@@ -8,26 +8,30 @@ import (
 	"time"
 )
 
-// Task states (spec §9.1 subset used in M2).
+// Task states (spec §9.1 subset used in M2/M3).
 const (
-	StateAccepted  = "accepted"
-	StatePending   = "pending"
-	StateExecuting = "executing"
-	StateExecuted  = "executed"
-	StateFailed    = "failed"
-	StateTimeout   = "timeout"
-	StateDenied    = "denied"
+	StateAccepted        = "accepted"
+	StatePendingApproval = "pending_approval"
+	StatePending         = "pending"
+	StateExecuting       = "executing"
+	StateExecuted        = "executed"
+	StateFailed          = "failed"
+	StateTimeout         = "timeout"
+	StateDenied          = "denied"
+	StateCanceled        = "canceled"
 )
 
 // Task is an in-memory task record (SQLite lands in M4).
 type Task struct {
 	ID                 string    `json:"id"`
 	Verb               string    `json:"verb"`
-	ArgsJSON           string    `json:"args_json,omitempty"`
+	ArgsJSON           string    `json:"args_json,omitempty"` // already redacted when secrets present
 	ArgvRedacted       []string  `json:"argv_redacted"`
 	State              string    `json:"state"`
 	Attempt            int       `json:"attempt"`
 	LastAttemptOutcome string    `json:"last_attempt_outcome,omitempty"`
+	ApprovalMode       string    `json:"approval_mode,omitempty"`
+	ApprovedBy         string    `json:"approved_by,omitempty"`
 	ExitCode           *int      `json:"exit_code,omitempty"`
 	Stdout             string    `json:"stdout,omitempty"`
 	Stderr             string    `json:"stderr,omitempty"`
@@ -37,7 +41,7 @@ type Task struct {
 	UpdatedAt          time.Time `json:"updated_at"`
 }
 
-// Memory is a process-local task store for M2.
+// Memory is a process-local task store for M2/M3.
 type Memory struct {
 	mu    sync.RWMutex
 	tasks map[string]*Task
@@ -48,7 +52,7 @@ func NewMemory() *Memory {
 	return &Memory{tasks: make(map[string]*Task)}
 }
 
-// Create inserts a new task in accepted/pending state.
+// Create inserts a new task.
 func (m *Memory) Create(verb string, argvRedacted []string, argsJSON string) *Task {
 	now := time.Now().UTC()
 	t := &Task{
@@ -56,7 +60,7 @@ func (m *Memory) Create(verb string, argvRedacted []string, argsJSON string) *Ta
 		Verb:         verb,
 		ArgsJSON:     argsJSON,
 		ArgvRedacted: append([]string(nil), argvRedacted...),
-		State:        StatePending,
+		State:        StateAccepted,
 		Attempt:      0,
 		CreatedAt:    now,
 		UpdatedAt:    now,
