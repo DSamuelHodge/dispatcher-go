@@ -8,11 +8,30 @@ capabilities); high-risk verbs gate on on-device `termux-dialog` approval (or ex
 
 - [`spec.md`](spec.md) — full specification (v1.0 MVP)
 - [`SRS.md`](SRS.md) — software requirements, traceability, acceptance criteria
+- [`docs/adr/`](docs/adr/) — architecture decision records
+- [`SECURITY.md`](SECURITY.md) — reporting & operator hardening
+- [`LICENSE`](LICENSE) — MIT
+
+## Layout
 
 ```text
 cmd/dispatcher/main.go
-internal/{config,verbs,auth,approve,exec,audit,queue,retry,circuit,streams,http}.go
-verbs.yaml  .agent-token(0600)  logs/audit.log  data/tasks.db
+internal/
+  config/ verbs/ termuxallow/   # M1 implemented
+  auth/ approve/ execx/ audit/  # scaffold (later milestones)
+  queue/ retry/ circuit/ streams/ api/
+verbs.yaml
+docs/adr/
 ```
 
-Status: specification phase — see issues for the 7 build milestones.
+Runtime (never committed): `.agent-token` (0600), `logs/audit.log`, `data/tasks.db`
+
+## Quick start (M1)
+
+```bash
+go test ./...
+go run ./cmd/dispatcher -version
+go run ./cmd/dispatcher -validate
+```
+
+Status: **M1 complete** (catalog load + allowlist validation). HTTP/auth begins in M2 — see issues #1–#7.

@@ -14,13 +14,14 @@ All verbs are defined declaratively in a YAML catalog (`verbs.yaml`):
 - (Tier C UI automation — `ui.tap/type/gesture/screen.read` — is an explicit **non-goal** for MVP;
   it requires an AccessibilityService companion app and violates the `termux-*` argv rule.)
 
-No daemon restart or code change is needed to add verbs — only edit YAML and restart
-(SIGHUP reload where supported).
+No code change is needed to add verbs — only edit YAML and **restart** the daemon
+(MVP does not hot-reload; ADR-0004).
 
 ## 2. Locked decisions
 
-- **Language:** Go, stdlib-first (`net/http`, `os/exec`, `database/sql` + SQLite driver;
-  `gopkg.in/yaml.v3` is the one allowed non-stdlib dep). Single static binary for Termux.
+- **Language:** Go, stdlib-first (`net/http`, `os/exec`, `database/sql`).
+  Allowed direct deps: `gopkg.in/yaml.v3` + `modernc.org/sqlite` (pure Go; ADR-0001, ADR-0006).
+  Single static binary for Termux (no CGO).
 - **Approval:** global `approval_mode` (`ask` | `always-approve`) **+** per-verb override;
   highest-risk verbs set `force_ask_even_if_global_auto: true`.
 - **Watch subscriptions:** only true-streaming verbs (`location`, `sensor`, `microphone-record`-style
@@ -40,16 +41,18 @@ agent ──HTTP 127.0.0.1:8477 + X-Agent-Token──▶ dispatcher-go
           └─ stream registry (Tier B watch: POST → GET poll → DELETE)
 ```
 
-File layout (repo currently holds only `.git/` + `.serena/`):
+File layout:
 
 ```text
 cmd/dispatcher/main.go
-internal/{config,verbs,auth,approve,exec,audit,queue,retry,circuit,streams,http}.go
+internal/config/ verbs/ termuxallow/ auth/ approve/ execx/ audit/
+internal/queue/ retry/ circuit/ streams/ api/
 verbs.yaml
-.agent-token            # chmod 0600, generated `openssl rand -hex 32` on first boot
-logs/audit.log          # NDJSON lifecycle log
-data/tasks.db           # SQLite WAL + synchronous=FULL
-~/.agent/approval-policy.json   # runtime ask|always-approve override (no YAML edit needed)
+docs/adr/
+.agent-token            # chmod 0600, generated on first boot (not committed)
+logs/audit.log          # NDJSON lifecycle log (outbox-drained; ADR-0002)
+data/tasks.db           # SQLite WAL + synchronous=FULL (modernc.org/sqlite)
+~/.agent/approval-policy.json   # runtime ask|always-approve override
 ~/.termux/boot/01-start-agent   # boot lifecycle hook
 ```
 
@@ -142,12 +145,18 @@ Rules:
 
 ### 5.3 Tier B watch (stateful subscriptions; bounded ring buffer, default 128)
 
+MVP watch verbs (ADR-0005):
+
 - `location.stream` → `termux-location -p gps|network -r updates` (held proc; HIGH battery cost — document).
 - `sensor.stream` → `termux-sensor -s <name> [-n <count>] [-d <delay-ms>]` / `-a` (all).
-- `microphone-record` → `termux-microphone-record -f <file> [-l seconds]` (bounded capture).
-- `sms-inbox.follow` → held `termux-sms-list` follow pattern.
-- Lifecycle: `POST /v1/streams {verb, args}` → `{stream_id}`; `GET /v1/streams/{id}?since=` (ring buffer);
-  `DELETE /v1/streams/{id}` kills the child proc and frees the buffer.
+
+Not watch streams in MVP:
+
+- `microphone.record` → **one-shot task** via `termux-microphone-record -f <file> [-l seconds]` (bounded capture).
+- `sms-inbox.follow` → **deferred** (no upstream follow; poll-wrapper is a non-goal per §2).
+
+Lifecycle (watch only): `POST /v1/streams {verb, args}` → `{stream_id}`; `GET /v1/streams/{id}?since=` (ring buffer);
+`DELETE /v1/streams/{id}` kills the child proc and frees the buffer.
 
 ## 6. HTTP surface (loopback only)
 
@@ -182,13 +191,21 @@ Rules:
 
 ## 9. Durability: SQLite + retry + circuit-breaker + resume
 
-- `data/tasks.db`, `journal_mode=WAL`, `synchronous=FULL`.
-- Tables: `tasks(id, verb, args_json, argv_redacted, state, attempt, next_run_at, created_at, updated_at)`,
-  `attempts(task_id, n, started_at, ended_at, exit_code, error)`,
-  `streams(id, verb, pid, buf_path, created_at)`.
-- Enqueue + audit-append in the same transaction where feasible.
-- Retry ONLY on `timeout|failed|nonzero-exit` (never denied/canceled). Attempts 0–5,
-  delay `backoff_base*2^n + jitter`.
+- Driver: `modernc.org/sqlite` (ADR-0001). Path `data/tasks.db`, `journal_mode=WAL`, `synchronous=FULL`.
+- Timestamps: UTC `RFC3339Nano` text columns for deterministic ordering.
+- Tables:
+  - `tasks(id, verb, args_json, argv_redacted, state, attempt, next_run_at, created_at, updated_at)`
+  - `attempts(task_id, n, started_at, ended_at, exit_code, error)`
+  - `streams(id, verb, pid, buf_path, created_at)`
+  - `audit_outbox(id, ts, payload_json, written_at)` — ADR-0002
+  - `idempotency_keys(key, verb, request_hash, task_id, created_at)` — ADR-0003 (TTL 24h)
+- **Atomicity:** task state + outbox row commit in one SQLite transaction; NDJSON file is drained
+  asynchronously with fsync (at-least-once). SQLite is source of truth.
+- Retry ONLY on terminal attempt outcomes `timeout|failed` (including nonzero exit). Never on
+  `denied`/`canceled`. Attempt index `n` runs `0..max_retries` inclusive (default max_retries=5 ⇒
+  6 attempts). After a failed attempt with index `n` where `n < max_retries`, schedule
+  `retry_scheduled` with delay `backoff_base_s * 2^n + jitter(≤250ms)` (`n` = index of the
+  attempt that just failed). When attempt `max_retries` fails → `exhausted`.
 - On exhaustion: state `exhausted` + `termux-notification --title "dispatcher: <verb> exhausted"
   -c "task <id> after 6 attempts"` (allowlisted to bypass an open circuit).
 - Circuit-breaker per verb-template: 5 consecutive timeout/fail → `open` 60s (fast `503 circuit_open`),
@@ -196,6 +213,69 @@ Rules:
 - Crash resume on boot: `SELECT … WHERE state IN ('pending','executing','retry_scheduled')
   ORDER BY created_at` — `executing` rows from a dead PID are requeued as `pending`
   (never marked executed without a waitpid result); due `retry_scheduled` rows resume in order.
+- Queue-full: when pending depth ≥ `daemon.max_queue_depth` → `503` `{code:"queue_full"}`.
+
+## 9.1 Task state machine (normative)
+
+Single source of truth for task lifecycle. HTTP `status` fields and audit transitions MUST use
+these state names only.
+
+```text
+                     ┌──────────────────────────────────────────────┐
+                     │                                              │
+  POST verb ──▶ accepted ──▶ pending_approval ──▶ approved ──▶ pending
+                     │              │                                  │
+                     │              └──── denied (terminal)             │
+                     │              └──── canceled (terminal)           │
+                     │                                                 ▼
+                     └──────── (no gate) ──────────────────────▶ executing
+                                                                   │
+                    ┌──────────────────────────────────────────────┤
+                    ▼              ▼              ▼                 ▼
+               executed         timeout        failed          (kill/crash)
+               (terminal)         │              │              executing
+                                  └──────┬───────┘                 │
+                                         ▼                         ▼
+                                 retry_scheduled ──(due)──▶ pending
+                                         │
+                                         └─(attempt n==max_retries failed)──▶ exhausted (terminal)
+```
+
+### States
+
+| State | Meaning |
+|-------|---------|
+| `accepted` | Request authenticated & validated; task row created; not yet gated/executed |
+| `pending_approval` | Waiting on approval backend (`ask`); HTTP may return 202 with this status |
+| `approved` | Gate passed (`ask` yes or policy auto); eligible to run |
+| `denied` | Terminal — user/policy denied or approval timeout; **never retries** |
+| `canceled` | Terminal — explicit cancel; **never retries** |
+| `pending` | Runnable, waiting for worker slot |
+| `executing` | Child process started; not terminal until waitpid/timeout |
+| `executed` | Terminal success (exit 0, or parser-defined success) |
+| `timeout` | Attempt timed out (retryable if attempts remain) |
+| `failed` | Attempt failed / nonzero exit (retryable if attempts remain) |
+| `retry_scheduled` | Waiting until `next_run_at` |
+| `exhausted` | Terminal — `max_retries` exhausted after retryable failures |
+
+Notes:
+
+- Gated verbs enter `pending_approval` before `approved`/`denied`. Ungated verbs may skip
+  `pending_approval` and go `accepted → pending` (still audit an `approved{by:"policy"}` when
+  auto policy applies).
+- `timeout`/`failed` are **attempt outcomes** recorded on `attempts` and in audit; the task row
+  then moves to `retry_scheduled`, `exhausted`, or stays reflectable via last outcome fields on GET.
+  For `GET /v1/tasks/{id}`, return the **task** state (`pending`/`retry_scheduled`/…); include
+  `last_attempt_outcome` when useful.
+- Practical simplification for MVP storage: persist task states
+  `{accepted, pending_approval, denied, canceled, pending, executing, retry_scheduled, executed, exhausted}`
+  and store attempt outcomes `timeout|failed|ok` on `attempts` only (do not leave the task row
+  permanently in `timeout`/`failed` except as last_outcome). Audit still emits
+  `executing → executed|timeout|failed|will-retry|exhausted` transition events.
+- **No phantom `executed`:** crash during `executing` resumes as `pending` (FR-6.5).
+- Approval HTTP: always `202` with `{task_id, status}` where `status` is the task state
+  (e.g. `pending_approval` or `pending`). Use `504` only if the **client** waits synchronously
+  for approval completion and the 120s gate times out (maps to task `denied`).
 
 ## 10. Complementary add-ons (post-MVP, non-contradicting extensions)
 
@@ -207,7 +287,7 @@ Rules:
 
 ## 11. Build milestones
 
-1. Config + verbs loader + catalog validation (Tier A forbids mutating argv; unknown binary/flag rejected).
+1. Config + verbs loader + catalog validation (Tier A forbids mutating argv; unknown binary/flag rejected). **Done in tree.**
 2. Auth + HTTP skeleton + `battery.status` end-to-end against real `termux-battery-status`.
 3. Approval gate (`termux-dialog confirm`) + redaction tests + `approval-policy.json` merge.
 4. Audit NDJSON + SQLite queue + worker + retry + exhaustion notification.

@@ -1,0 +1,251 @@
+# dispatcher-go verb catalog (schema v1)
+# Adding a verb = edit this file and restart the daemon (see ADR-0004).
+version: 1
+daemon:
+  listen: "127.0.0.1:8477"
+  approval_mode: ask
+  approval_backend: dialog
+  task_timeout_s: 30
+  max_retries: 5          # total attempts = 1 + max_retries (attempts index 0..max_retries)
+  backoff_base_s: 1       # delay after failure n = base * 2^n + jitter(<=250ms); n = attempt index of failed try
+  cb_trip_threshold: 5
+  cb_open_s: 60
+  max_queue_depth: 1024
+  stream_buffer_default: 128
+
+verbs:
+  # --- Tier A perceive ---
+  - name: battery.status
+    tier: A
+    risk: none
+    approval: inherit
+    argv: ["termux-battery-status"]
+    parser: json
+    watch: false
+
+  - name: camera.info
+    tier: A
+    risk: none
+    approval: inherit
+    argv: ["termux-camera-info"]
+    parser: json
+    watch: false
+
+  - name: audio.info
+    tier: A
+    risk: none
+    approval: inherit
+    argv: ["termux-audio-info"]
+    parser: json
+    watch: false
+
+  - name: wifi.info
+    tier: A
+    risk: low
+    approval: inherit
+    argv: ["termux-wifi-connectioninfo"]
+    parser: json
+    watch: false
+
+  - name: wifi.scan-one-shot
+    tier: A
+    risk: low
+    approval: inherit
+    argv: ["termux-wifi-scaninfo"]
+    parser: json
+    watch: false
+
+  - name: telephony.cell
+    tier: A
+    risk: medium
+    approval: inherit
+    argv: ["termux-telephony-cellinfo"]
+    parser: json
+    watch: false
+
+  - name: telephony.device
+    tier: A
+    risk: low
+    approval: inherit
+    argv: ["termux-telephony-deviceinfo"]
+    parser: json
+    watch: false
+
+  - name: clipboard.get
+    tier: A
+    risk: medium
+    approval: inherit
+    argv: ["termux-clipboard-get"]
+    parser: text
+    watch: false
+
+  - name: contacts.list
+    tier: A
+    risk: medium
+    approval: inherit
+    argv: ["termux-contact-list"]
+    parser: json
+    watch: false
+
+  - name: call-log.read
+    tier: A
+    risk: medium
+    approval: inherit
+    argv: ["termux-call-log"]
+    args:
+      - {name: limit, flag: -l, type: int, required: false}
+    parser: json
+    watch: false
+
+  - name: sms.read
+    tier: A
+    risk: medium
+    approval: inherit
+    argv: ["termux-sms-list"]
+    parser: json
+    watch: false
+
+  - name: sensor.list
+    tier: A
+    risk: none
+    approval: inherit
+    argv: ["termux-sensor", "-l"]
+    parser: json
+    watch: false
+
+  - name: location.once
+    tier: A
+    risk: medium
+    approval: inherit
+    argv: ["termux-location", "-p", "{{.provider}}", "-r", "{{.request}}"]
+    args:
+      - {name: provider, flag: -p, type: string, required: false}
+      - {name: request, flag: -r, type: string, required: false}
+    parser: json
+    watch: false
+
+  - name: volume.info
+    tier: A
+    risk: none
+    approval: inherit
+    argv: ["termux-volume"]
+    parser: text
+    watch: false
+
+  - name: tts.engines
+    tier: A
+    risk: none
+    approval: inherit
+    argv: ["termux-tts-engines"]
+    parser: json
+    watch: false
+
+  - name: notification.list
+    tier: A
+    risk: medium
+    approval: inherit
+    argv: ["termux-notification-list"]
+    parser: json
+    watch: false
+
+  - name: infrared.frequencies
+    tier: A
+    risk: none
+    approval: inherit
+    argv: ["termux-infrared-frequencies"]
+    parser: json
+    watch: false
+
+  # --- Tier B act (seed; full set expands in M7) ---
+  - name: clipboard.set
+    tier: B
+    risk: medium
+    approval: inherit
+    argv: ["termux-clipboard-set"]
+    stdin_arg: {arg: text}
+    parser: exit
+    watch: false
+
+  - name: sms.send
+    tier: B
+    risk: high
+    approval: ask
+    force_ask_even_if_global_auto: true
+    argv: ["termux-sms-send", "-n", "{{.number}}"]
+    args:
+      - {name: number, flag: -n, type: string, required: true}
+    stdin_arg: {arg: text}
+    timeout_s: 30
+    parser: exit
+    watch: false
+
+  - name: telephony.call
+    tier: B
+    risk: high
+    approval: ask
+    force_ask_even_if_global_auto: true
+    argv: ["termux-telephony-call", "{{.number}}"]
+    args:
+      - {name: number, flag: "", type: string, required: true}
+    parser: exit
+    watch: false
+
+  - name: toast.show
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-toast", "{{.text}}"]
+    parser: exit
+    watch: false
+
+  - name: notification.send
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-notification", "-t", "{{.title}}", "-c", "{{.content}}"]
+    parser: exit
+    watch: false
+
+  - name: vibrate
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-vibrate"]
+    args:
+      - {name: duration_ms, flag: -d, type: int, required: false}
+    parser: exit
+    watch: false
+
+  # --- Tier B watch ---
+  - name: location.stream
+    tier: B
+    risk: medium
+    approval: inherit
+    argv: ["termux-location", "-p", "{{.provider}}", "-r", "updates"]
+    watch:
+      mode: stream
+      buffer: 128
+    parser: json
+
+  - name: sensor.stream
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-sensor", "-s", "{{.sensor}}"]
+    watch:
+      mode: stream
+      buffer: 128
+    parser: json
+
+  # microphone-record is a bounded one-shot capture (task), not a watch stream — ADR-0005
+  - name: microphone.record
+    tier: B
+    risk: high
+    approval: ask
+    force_ask_even_if_global_auto: true
+    argv: ["termux-microphone-record", "-f", "{{.file}}"]
+    args:
+      - {name: file, flag: -f, type: string, required: true}
+      - {name: limit_s, flag: -l, type: int, required: false}
+    parser: exit
+    watch: false
