@@ -1,0 +1,25 @@
+# Go build artifacts
+/dispatcher
+/dispatcher-go
+*.exe
+*.test
+*.out
+
+# Go module cache / vendor (reproducible via go.sum)
+/vendor/
+
+# Daemon runtime state — NEVER commit
+.agent-token
+logs/
+data/
+*.db
+*.db-wal
+*.db-shm
+~/.agent/
+
+# Local tooling / OS
+.serena/
+.idea/
+.vscode/
+*.swp
+.DS_Store
