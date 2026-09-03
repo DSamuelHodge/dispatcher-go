@@ -18,6 +18,7 @@ import (
 	"github.com/DSamuelHodge/dispatcher-go/internal/approve"
 	"github.com/DSamuelHodge/dispatcher-go/internal/audit"
 	"github.com/DSamuelHodge/dispatcher-go/internal/auth"
+	"github.com/DSamuelHodge/dispatcher-go/internal/circuit"
 	"github.com/DSamuelHodge/dispatcher-go/internal/queue"
 	"github.com/DSamuelHodge/dispatcher-go/internal/verbs"
 )
@@ -313,5 +314,29 @@ func TestUnknownVerb(t *testing.T) {
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusNotFound {
 		t.Fatalf("status=%d", res.StatusCode)
+	}
+}
+
+func TestCircuitOpen503(t *testing.T) {
+	s, base, _, cleanup := setup(t, nil)
+	defer cleanup()
+	s.Circuits = circuit.NewRegistry(1, time.Minute)
+	// trip battery breaker
+	br := s.Circuits.For("battery.status", 1)
+	br.Failure()
+	req, _ := http.NewRequest(http.MethodPost, base+"/v1/verbs/battery.status", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set(auth.Header, s.Token.String())
+	req.Header.Set("Content-Type", "application/json")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d", res.StatusCode)
+	}
+	body, _ := io.ReadAll(res.Body)
+	if !strings.Contains(string(body), "circuit_open") {
+		t.Fatalf("%s", body)
 	}
 }

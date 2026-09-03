@@ -15,6 +15,7 @@ import (
 	"github.com/DSamuelHodge/dispatcher-go/internal/approve"
 	"github.com/DSamuelHodge/dispatcher-go/internal/audit"
 	"github.com/DSamuelHodge/dispatcher-go/internal/auth"
+	"github.com/DSamuelHodge/dispatcher-go/internal/circuit"
 	"github.com/DSamuelHodge/dispatcher-go/internal/notify"
 	"github.com/DSamuelHodge/dispatcher-go/internal/queue"
 	"github.com/DSamuelHodge/dispatcher-go/internal/verbs"
@@ -22,7 +23,7 @@ import (
 )
 
 // Version is set via -ldflags "-X main.Version=..." at release build time.
-var Version = "0.4.0-dev"
+var Version = "0.5.0-dev"
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -116,11 +117,21 @@ func run(args []string) int {
 	}
 	defer store.Close()
 
+	resumeStats, err := queue.Resume(store, time.Now().UTC())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dispatcher: resume: %v\n", err)
+		return 1
+	}
+
+	circuits := circuit.NewRegistry(cat.Daemon.CBTripThreshold, time.Duration(cat.Daemon.CBOpenS)*time.Second)
+
 	srv := api.New(cat, tok, store)
 	srv.Policy = policy
 	srv.Audit = alog
 	srv.Prompter = approve.DialogPrompter{}
 	srv.SyncExec = *syncExec
+	srv.Circuits = circuits
+	srv.Resume = resumeStats
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -130,6 +141,7 @@ func run(args []string) int {
 		Catalog:     cat,
 		AuditLog:    alog,
 		Notifier:    notify.Termux{},
+		Circuits:    circuits,
 		BackoffBase: time.Duration(cat.Daemon.BackoffBaseS * float64(time.Second)),
 		MaxJitter:   250 * time.Millisecond,
 		PollEvery:   200 * time.Millisecond,
@@ -141,6 +153,8 @@ func run(args []string) int {
 	fmt.Printf("token: %s\n", tokFile)
 	fmt.Printf("db: %s\n", dPath)
 	fmt.Printf("audit: %s\n", aPath)
+	fmt.Printf("resume: executing→pending=%d pending=%d retry_due=%d\n",
+		resumeStats.ExecutingToPending, resumeStats.PendingKept, resumeStats.RetryDue)
 	fmt.Printf("worker: on (sync-exec=%v)\n", *syncExec)
 	if err := srv.ListenAndServe(ctx, cat.Daemon.Listen); err != nil && err != context.Canceled {
 		fmt.Fprintf(os.Stderr, "dispatcher: serve: %v\n", err)

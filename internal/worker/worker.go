@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/DSamuelHodge/dispatcher-go/internal/audit"
+	"github.com/DSamuelHodge/dispatcher-go/internal/circuit"
 	"github.com/DSamuelHodge/dispatcher-go/internal/execx"
 	"github.com/DSamuelHodge/dispatcher-go/internal/notify"
 	"github.com/DSamuelHodge/dispatcher-go/internal/queue"
@@ -21,6 +22,7 @@ type Worker struct {
 	Catalog     *verbs.Catalog
 	AuditLog    *audit.Logger
 	Notifier    notify.Notifier
+	Circuits    *circuit.Registry
 	BackoffBase time.Duration
 	MaxJitter   time.Duration
 	PollEvery   time.Duration
@@ -70,6 +72,28 @@ func (w *Worker) execute(ctx context.Context, task *queue.Task) {
 			t.LastAttemptOutcome = "failed"
 		})
 		return
+	}
+	trip := 0
+	if v.CircuitBreakerThreshold != nil {
+		trip = *v.CircuitBreakerThreshold
+	}
+	var br *circuit.Breaker
+	if w.Circuits != nil {
+		br = w.Circuits.For(task.Verb, trip)
+		if !br.Allow() {
+			// requeue shortly — circuit open (exhaustion notify still bypasses via direct path)
+			next := time.Now().UTC().Add(time.Second)
+			_ = w.Store.Update(task.ID, func(t *queue.Task) {
+				t.State = queue.StateRetryScheduled
+				t.NextRunAt = &next
+				t.Error = "circuit_open"
+			})
+			_ = w.audit(audit.Event{
+				TaskID: task.ID, Verb: task.Verb, State: "circuit_open",
+				ArgvRedacted: task.ArgvRedacted, Error: "circuit_open",
+			})
+			return
+		}
 	}
 	timeout := time.Duration(w.Catalog.Daemon.TaskTimeoutS) * time.Second
 	if v.TimeoutS > 0 {
@@ -125,6 +149,9 @@ func (w *Worker) execute(ctx context.Context, task *queue.Task) {
 			t.Error = ""
 			t.NextRunAt = nil
 		})
+		if br != nil {
+			br.Success()
+		}
 		_ = w.audit(audit.Event{
 			TaskID: task.ID, Verb: task.Verb, Tier: string(v.Tier), Risk: string(v.Risk),
 			State: queue.StateExecuted, ArgvRedacted: task.ArgvRedacted, ExitCode: &ec,
@@ -134,6 +161,9 @@ func (w *Worker) execute(ctx context.Context, task *queue.Task) {
 	}
 
 	// failed / timeout
+	if br != nil {
+		br.Failure()
+	}
 	if retry.ShouldExhaust(n, maxRetries) {
 		_ = w.Store.Update(task.ID, func(t *queue.Task) {
 			t.State = queue.StateExhausted

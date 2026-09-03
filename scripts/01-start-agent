@@ -1,0 +1,18 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# Termux:Boot hook — install as ~/.termux/boot/01-start-agent
+# Starts dispatcher-go after device boot; crash-resume runs inside the daemon.
+set -eu
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+HOME="${HOME:-/data/data/com.termux/files/home}"
+DISPATCHER_HOME="${DISPATCHER_HOME:-$HOME/dispatcher-go}"
+BIN="${DISPATCHER_BIN:-$PREFIX/bin/dispatcher-go}"
+LOGDIR="${DISPATCHER_HOME}/logs"
+mkdir -p "$LOGDIR" "$DISPATCHER_HOME/data"
+# avoid duplicate if already running
+if pgrep -f 'dispatcher-go' >/dev/null 2>&1; then
+  exit 0
+fi
+nohup "$BIN" \
+  -data-dir "$DISPATCHER_HOME" \
+  -catalog "${DISPATCHER_HOME}/verbs.yaml" \
+  >>"$LOGDIR/daemon.stdout" 2>>"$LOGDIR/daemon.stderr" &

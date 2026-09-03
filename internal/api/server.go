@@ -14,6 +14,7 @@ import (
 	"github.com/DSamuelHodge/dispatcher-go/internal/approve"
 	"github.com/DSamuelHodge/dispatcher-go/internal/audit"
 	"github.com/DSamuelHodge/dispatcher-go/internal/auth"
+	"github.com/DSamuelHodge/dispatcher-go/internal/circuit"
 	"github.com/DSamuelHodge/dispatcher-go/internal/execx"
 	"github.com/DSamuelHodge/dispatcher-go/internal/queue"
 	"github.com/DSamuelHodge/dispatcher-go/internal/verbs"
@@ -27,6 +28,8 @@ type Server struct {
 	Policy    approve.PolicyFile
 	Prompter  approve.Prompter
 	Audit     *audit.Logger
+	Circuits  *circuit.Registry
+	Resume    queue.ResumeStats
 	StartedAt time.Time
 	// SyncExec runs approval+first-exec inline (tests / simple mode).
 	// When false, after approval the task is left pending for the worker.
@@ -121,12 +124,19 @@ func (s *Server) effectiveMode() string {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	cb := map[string]any{}
+	if s.Circuits != nil {
+		for k, v := range s.Circuits.Snapshots() {
+			cb[k] = v
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"mode":        s.effectiveMode(),
 		"queue_depth": s.Tasks.Depth(),
-		"cb_states":   map[string]any{},
+		"cb_states":   cb,
+		"resume":      s.Resume,
 		"uptime_s":    int(time.Since(s.StartedAt).Seconds()),
-		"version":     "m4",
+		"version":     "m5",
 	})
 }
 
@@ -192,6 +202,20 @@ func (s *Server) handlePostVerb(w http.ResponseWriter, r *http.Request) {
 	maxRetries := s.Catalog.Daemon.MaxRetries
 	if v.Retries != nil {
 		maxRetries = *v.Retries
+	}
+	if s.Circuits != nil {
+		trip := 0
+		if v.CircuitBreakerThreshold != nil {
+			trip = *v.CircuitBreakerThreshold
+		}
+		br := s.Circuits.For(v.Name, trip)
+		// Peek: if open and not yet half-open window, reject fast.
+		// Allow() would consume half-open slot — use Snapshot.
+		sn := br.Snapshot()
+		if sn.State == circuit.Open {
+			writeErr(w, http.StatusServiceUnavailable, "circuit_open", fmt.Sprintf("circuit open for %s", v.Name), "")
+			return
+		}
 	}
 	task, err := s.Tasks.Create(queue.CreateInput{
 		Verb:         v.Name,

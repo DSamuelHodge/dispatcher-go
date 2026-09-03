@@ -21,7 +21,8 @@ internal/
   auth/ api/ execx/ queue/      # M2 (in-memory tasks; SQLite in M4)
   approve/ audit/               # M3
   queue/ (sqlite) worker/ retry/ notify/  # M4
-  circuit/ streams/
+  circuit/                              # M5
+  streams/                              # M6
 verbs.yaml
 docs/adr/
 ```
@@ -42,5 +43,10 @@ curl -sS -H "X-Agent-Token: $(tr -d '\n' < .agent-token)" \
 
 Routes: `GET /v1/health`, `GET /v1/verbs`, `POST /v1/verbs/{name}`, `GET /v1/tasks/{id}`, `GET /v1/tasks`.
 
-Status: **M4 complete** (SQLite WAL queue, audit outbox, retry worker, exhaustion notify).
-Circuit-breaker + crash resume is M5 — see issues #1–#7.
+Status: **M5 complete** (circuit-breaker, crash resume, Termux boot hook).
+Streams M6 / full seed+CI M7 — see issues #1–#7.
+
+## Boot (Termux)
+
+Copy [`scripts/01-start-agent`](scripts/01-start-agent) to `~/.termux/boot/01-start-agent` (Termux:Boot).
+On start the daemon runs crash-resume (`executing`→`pending`) before accepting work.
