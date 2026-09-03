@@ -20,6 +20,7 @@ import (
 	"github.com/DSamuelHodge/dispatcher-go/internal/auth"
 	"github.com/DSamuelHodge/dispatcher-go/internal/circuit"
 	"github.com/DSamuelHodge/dispatcher-go/internal/queue"
+	"github.com/DSamuelHodge/dispatcher-go/internal/streams"
 	"github.com/DSamuelHodge/dispatcher-go/internal/verbs"
 )
 
@@ -338,5 +339,100 @@ func TestCircuitOpen503(t *testing.T) {
 	body, _ := io.ReadAll(res.Body)
 	if !strings.Contains(string(body), "circuit_open") {
 		t.Fatalf("%s", body)
+	}
+}
+
+func TestStreamLifecycle(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip()
+	}
+	s, base, _, cleanup := setup(t, nil)
+	defer cleanup()
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, "termux-location"), []byte("#!/bin/sh\nwhile true; do echo loc-$(date +%s); sleep 0.05; done\n"), 0o755)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	s.Streams = streams.NewRegistry(8)
+	// inject stream verb into catalog
+	cat2, err := verbs.Parse([]byte(catalogYAML + `
+  - name: location.stream
+    tier: B
+    risk: medium
+    approval: always-approve
+    argv: ["termux-location", "-p", "gps", "-r", "updates"]
+    parser: json
+    watch: {mode: stream, buffer: 8}
+`))
+	if err != nil {
+		// catalogYAML already complete — merge by reparse full
+		t.Log(err)
+	}
+	_ = cat2
+	// use existing setup catalog — add location.stream via direct map
+	s.Catalog.ByName["location.stream"] = verbs.Verb{
+		Name: "location.stream", Tier: verbs.TierB, Risk: verbs.RiskMedium,
+		Approval: verbs.ApprovalAlwaysApprove,
+		Argv:     []string{"termux-location", "-p", "gps", "-r", "updates"},
+		Watch:    map[string]any{"mode": "stream", "buffer": float64(8)},
+	}
+	s.Catalog.Order = append(s.Catalog.Order, "location.stream")
+
+	body, _ := json.Marshal(map[string]any{"verb": "location.stream", "args": map[string]any{}})
+	req, _ := http.NewRequest(http.MethodPost, base+"/v1/streams", bytes.NewReader(body))
+	req.Header.Set(auth.Header, s.Token.String())
+	req.Header.Set("Content-Type", "application/json")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode != http.StatusAccepted {
+		t.Fatalf("%d %s", res.StatusCode, raw)
+	}
+	var out struct {
+		StreamID string `json:"stream_id"`
+	}
+	_ = json.Unmarshal(raw, &out)
+	if out.StreamID == "" {
+		t.Fatal(raw)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	var events int
+	for time.Now().Before(deadline) {
+		greq, _ := http.NewRequest(http.MethodGet, base+"/v1/streams/"+out.StreamID+"?since=0", nil)
+		greq.Header.Set(auth.Header, s.Token.String())
+		gres, err := http.DefaultClient.Do(greq)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gb, _ := io.ReadAll(gres.Body)
+		gres.Body.Close()
+		var g struct {
+			Events []any `json:"events"`
+		}
+		_ = json.Unmarshal(gb, &g)
+		events = len(g.Events)
+		if events > 0 {
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	if events < 1 {
+		t.Fatal("no stream events")
+	}
+	dreq, _ := http.NewRequest(http.MethodDelete, base+"/v1/streams/"+out.StreamID, nil)
+	dreq.Header.Set(auth.Header, s.Token.String())
+	dres, _ := http.DefaultClient.Do(dreq)
+	dres.Body.Close()
+	if dres.StatusCode != http.StatusOK {
+		t.Fatalf("delete %d", dres.StatusCode)
+	}
+	// 404 after delete
+	greq, _ := http.NewRequest(http.MethodGet, base+"/v1/streams/"+out.StreamID, nil)
+	greq.Header.Set(auth.Header, s.Token.String())
+	gres, _ := http.DefaultClient.Do(greq)
+	gres.Body.Close()
+	if gres.StatusCode != http.StatusNotFound {
+		t.Fatalf("want 404 got %d", gres.StatusCode)
 	}
 }

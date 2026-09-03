@@ -17,6 +17,7 @@ import (
 	"github.com/DSamuelHodge/dispatcher-go/internal/circuit"
 	"github.com/DSamuelHodge/dispatcher-go/internal/execx"
 	"github.com/DSamuelHodge/dispatcher-go/internal/queue"
+	"github.com/DSamuelHodge/dispatcher-go/internal/streams"
 	"github.com/DSamuelHodge/dispatcher-go/internal/verbs"
 )
 
@@ -29,6 +30,7 @@ type Server struct {
 	Prompter  approve.Prompter
 	Audit     *audit.Logger
 	Circuits  *circuit.Registry
+	Streams   *streams.Registry
 	Resume    queue.ResumeStats
 	StartedAt time.Time
 	// SyncExec runs approval+first-exec inline (tests / simple mode).
@@ -56,6 +58,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/verbs/{name}", s.handlePostVerb)
 	mux.HandleFunc("GET /v1/tasks/{id}", s.handleGetTask)
 	mux.HandleFunc("GET /v1/tasks", s.handleListTasks)
+	mux.HandleFunc("POST /v1/streams", s.handlePostStream)
+	mux.HandleFunc("GET /v1/streams/{id}", s.handleGetStream)
+	mux.HandleFunc("DELETE /v1/streams/{id}", s.handleDeleteStream)
 	return s.withAuth(mux)
 }
 
@@ -136,7 +141,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"cb_states":   cb,
 		"resume":      s.Resume,
 		"uptime_s":    int(time.Since(s.StartedAt).Seconds()),
-		"version":     "m5",
+		"version":     "m6",
 	})
 }
 
@@ -404,6 +409,99 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
 	writeJSON(w, http.StatusOK, map[string]any{"tasks": s.Tasks.List(state)})
+}
+
+func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
+	if s.Streams == nil {
+		writeErr(w, http.StatusServiceUnavailable, "streams_disabled", "stream registry not configured", "")
+		return
+	}
+	var body struct {
+		Verb string         `json:"verb"`
+		Args map[string]any `json:"args"`
+	}
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(&body); err != nil && err != io.EOF {
+		writeErr(w, http.StatusBadRequest, "invalid_json", err.Error(), "")
+		return
+	}
+	if body.Args == nil {
+		body.Args = map[string]any{}
+	}
+	v, ok := s.Catalog.Get(body.Verb)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "unknown_verb", fmt.Sprintf("verb %q not found", body.Verb), "")
+		return
+	}
+	isWatch := false
+	switch wch := v.Watch.(type) {
+	case map[string]any:
+		if m, _ := wch["mode"].(string); m == "stream" {
+			isWatch = true
+		}
+	}
+	if !isWatch {
+		writeErr(w, http.StatusBadRequest, "not_a_stream", fmt.Sprintf("%q is not a watch stream verb", body.Verb), "")
+		return
+	}
+	argv, argvRedacted, err := expandArgv(v, body.Args, "")
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "validation_error", err.Error(), "")
+		return
+	}
+	st, err := s.Streams.Start(v, argv)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "stream_start_failed", err.Error(), "")
+		return
+	}
+	_ = s.audit(audit.Event{
+		TaskID: st.ID, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
+		State: "stream_open", ArgvRedacted: argvRedacted,
+	})
+	writeJSON(w, http.StatusAccepted, map[string]any{"stream_id": st.ID, "verb": st.Verb})
+}
+
+func (s *Server) handleGetStream(w http.ResponseWriter, r *http.Request) {
+	if s.Streams == nil {
+		writeErr(w, http.StatusNotFound, "unknown_stream", "no streams", "")
+		return
+	}
+	id := r.PathValue("id")
+	st, ok := s.Streams.Get(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "unknown_stream", fmt.Sprintf("stream %q not found", id), id)
+		return
+	}
+	var since uint64
+	if q := r.URL.Query().Get("since"); q != "" {
+		_, _ = fmt.Sscanf(q, "%d", &since)
+	}
+	events := st.Ring.Since(since)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"stream_id": st.ID,
+		"verb":      st.Verb,
+		"events":    events,
+		"buffered":  st.Ring.Len(),
+	})
+}
+
+func (s *Server) handleDeleteStream(w http.ResponseWriter, r *http.Request) {
+	if s.Streams == nil {
+		writeErr(w, http.StatusNotFound, "unknown_stream", "no streams", "")
+		return
+	}
+	id := r.PathValue("id")
+	st, ok := s.Streams.Get(id)
+	verb := ""
+	if ok {
+		verb = st.Verb
+	}
+	if err := s.Streams.Delete(id); err != nil {
+		writeErr(w, http.StatusNotFound, "unknown_stream", err.Error(), id)
+		return
+	}
+	_ = s.audit(audit.Event{TaskID: id, Verb: verb, State: "stream_closed"})
+	writeJSON(w, http.StatusOK, map[string]any{"stream_id": id, "status": "closed"})
 }
 
 func expandArgv(v verbs.Verb, args map[string]any, stdin string) (argv, redacted []string, err error) {

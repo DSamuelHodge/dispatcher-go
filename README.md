@@ -41,10 +41,9 @@ curl -sS -H "X-Agent-Token: $(tr -d '\n' < .agent-token)" \
   -d '{}' http://127.0.0.1:8477/v1/verbs/battery.status
 ```
 
-Routes: `GET /v1/health`, `GET /v1/verbs`, `POST /v1/verbs/{name}`, `GET /v1/tasks/{id}`, `GET /v1/tasks`.
+Routes: `GET /v1/health`, `GET /v1/verbs`, `POST /v1/verbs/{name}`, `GET /v1/tasks/{id}`, `GET /v1/tasks`, `POST|GET|DELETE /v1/streams`.
 
-Status: **M5 complete** (circuit-breaker, crash resume, Termux boot hook).
-Streams M6 / full seed+CI M7 — see issues #1–#7.
+Status: **MVP complete (M1–M7)** — streams, expanded verbs.yaml seed, GitHub Actions CI.
 
 ## Boot (Termux)
 

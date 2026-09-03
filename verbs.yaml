@@ -249,3 +249,174 @@ verbs:
       - {name: limit_s, flag: -l, type: int, required: false}
     parser: exit
     watch: false
+
+  - name: camera.photo
+    tier: B
+    risk: medium
+    approval: inherit
+    argv: ["termux-camera-photo", "-c", "{{.camera}}", "{{.file}}"]
+    args:
+      - {name: camera, flag: -c, type: int, required: false}
+      - {name: file, flag: "", type: string, required: true}
+    parser: exit
+    watch: false
+
+  - name: tts.speak
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-tts-speak", "{{.text}}"]
+    args:
+      - {name: text, flag: "", type: string, required: true}
+    parser: exit
+    watch: false
+
+  - name: media.play
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-media-player", "play", "-f", "{{.file}}"]
+    args:
+      - {name: file, flag: -f, type: string, required: true}
+    parser: exit
+    watch: false
+
+  - name: brightness.set
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-brightness", "{{.level}}"]
+    args:
+      - {name: level, flag: "", type: int, required: true}
+    parser: exit
+    watch: false
+
+  - name: torch
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-torch", "{{.state}}"]
+    args:
+      - {name: state, flag: "", type: string, required: true}
+    parser: exit
+    watch: false
+
+  - name: open.url
+    tier: B
+    risk: medium
+    approval: inherit
+    argv: ["termux-open", "{{.url}}"]
+    args:
+      - {name: url, flag: "", type: string, required: true}
+    parser: exit
+    watch: false
+
+  - name: share
+    tier: B
+    risk: medium
+    approval: inherit
+    argv: ["termux-share", "{{.file}}"]
+    args:
+      - {name: file, flag: "", type: string, required: true}
+    parser: exit
+    watch: false
+
+  - name: download.file
+    tier: B
+    risk: medium
+    approval: inherit
+    argv: ["termux-download", "{{.url}}"]
+    args:
+      - {name: url, flag: "", type: string, required: true}
+    parser: exit
+    watch: false
+
+  - name: notification.remove
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-notification-remove", "{{.id}}"]
+    args:
+      - {name: id, flag: "", type: string, required: true}
+    parser: exit
+    watch: false
+
+  - name: volume.set
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-volume", "{{.stream}}", "{{.level}}"]
+    args:
+      - {name: stream, flag: "", type: string, required: true}
+      - {name: level, flag: "", type: int, required: true}
+    parser: exit
+    watch: false
+
+  - name: wallpaper.set
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-wallpaper", "-f", "{{.file}}"]
+    args:
+      - {name: file, flag: -f, type: string, required: true}
+    parser: exit
+    watch: false
+
+  - name: fingerprint.auth
+    tier: B
+    risk: high
+    approval: ask
+    force_ask_even_if_global_auto: true
+    argv: ["termux-fingerprint"]
+    parser: json
+    watch: false
+
+  - name: infrared.transmit
+    tier: B
+    risk: medium
+    approval: inherit
+    argv: ["termux-infrared-transmit", "-f", "{{.frequency}}"]
+    args:
+      - {name: frequency, flag: -f, type: string, required: true}
+    parser: exit
+    watch: false
+
+  - name: saf.ls
+    tier: A
+    risk: low
+    approval: inherit
+    argv: ["termux-saf-ls"]
+    parser: json
+    watch: false
+
+  - name: saf.stat
+    tier: A
+    risk: low
+    approval: inherit
+    argv: ["termux-saf-stat"]
+    parser: json
+    watch: false
+
+  - name: saf.dirs
+    tier: A
+    risk: low
+    approval: inherit
+    argv: ["termux-saf-dirs"]
+    parser: json
+    watch: false
+
+  - name: nfc.list
+    tier: A
+    risk: low
+    approval: inherit
+    argv: ["termux-nfc", "-r"]
+    parser: json
+    watch: false
+
+  - name: usb.list
+    tier: A
+    risk: low
+    approval: inherit
+    argv: ["termux-usb", "-l"]
+    parser: text
+    watch: false

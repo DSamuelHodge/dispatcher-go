@@ -18,12 +18,13 @@ import (
 	"github.com/DSamuelHodge/dispatcher-go/internal/circuit"
 	"github.com/DSamuelHodge/dispatcher-go/internal/notify"
 	"github.com/DSamuelHodge/dispatcher-go/internal/queue"
+	"github.com/DSamuelHodge/dispatcher-go/internal/streams"
 	"github.com/DSamuelHodge/dispatcher-go/internal/verbs"
 	"github.com/DSamuelHodge/dispatcher-go/internal/worker"
 )
 
 // Version is set via -ldflags "-X main.Version=..." at release build time.
-var Version = "0.5.0-dev"
+var Version = "0.7.0-dev"
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -132,6 +133,8 @@ func run(args []string) int {
 	srv.SyncExec = *syncExec
 	srv.Circuits = circuits
 	srv.Resume = resumeStats
+	srv.Streams = streams.NewRegistry(cat.Daemon.StreamBufferDefault)
+	defer srv.Streams.CloseAll()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
