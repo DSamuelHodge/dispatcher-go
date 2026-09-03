@@ -1,2 +1,2 @@
-// Package queue is implemented in a later milestone. Scaffold only.
+// Package queue provides task storage. M2 uses an in-memory store; M4 adds SQLite.
 package queue

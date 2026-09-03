@@ -17,21 +17,28 @@ capabilities); high-risk verbs gate on on-device `termux-dialog` approval (or ex
 ```text
 cmd/dispatcher/main.go
 internal/
-  config/ verbs/ termuxallow/   # M1 implemented
-  auth/ approve/ execx/ audit/  # scaffold (later milestones)
-  queue/ retry/ circuit/ streams/ api/
+  config/ verbs/ termuxallow/   # M1
+  auth/ api/ execx/ queue/      # M2 (in-memory tasks; SQLite in M4)
+  approve/ audit/ retry/ circuit/ streams/
 verbs.yaml
 docs/adr/
 ```
 
 Runtime (never committed): `.agent-token` (0600), `logs/audit.log`, `data/tasks.db`
 
-## Quick start (M1)
+## Quick start
 
 ```bash
 go test ./...
-go run ./cmd/dispatcher -version
 go run ./cmd/dispatcher -validate
+go run ./cmd/dispatcher                 # listens on 127.0.0.1:8477
+# token is created at ./.agent-token on first run
+curl -sS -H "X-Agent-Token: $(tr -d '\n' < .agent-token)" \
+  -H 'Content-Type: application/json' \
+  -d '{}' http://127.0.0.1:8477/v1/verbs/battery.status
 ```
 
-Status: **M1 complete** (catalog load + allowlist validation). HTTP/auth begins in M2 — see issues #1–#7.
+Routes: `GET /v1/health`, `GET /v1/verbs`, `POST /v1/verbs/{name}`, `GET /v1/tasks/{id}`, `GET /v1/tasks`.
+
+Status: **M2 complete** (auth + HTTP + sync exec + `battery.status` with PATH shim tests).
+Approval gate M3; durable queue M4 — see issues #1–#7.
