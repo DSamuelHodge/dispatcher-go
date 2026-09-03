@@ -9,17 +9,20 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/DSamuelHodge/dispatcher-go/internal/api"
 	"github.com/DSamuelHodge/dispatcher-go/internal/approve"
 	"github.com/DSamuelHodge/dispatcher-go/internal/audit"
 	"github.com/DSamuelHodge/dispatcher-go/internal/auth"
+	"github.com/DSamuelHodge/dispatcher-go/internal/notify"
 	"github.com/DSamuelHodge/dispatcher-go/internal/queue"
 	"github.com/DSamuelHodge/dispatcher-go/internal/verbs"
+	"github.com/DSamuelHodge/dispatcher-go/internal/worker"
 )
 
 // Version is set via -ldflags "-X main.Version=..." at release build time.
-var Version = "0.3.0-dev"
+var Version = "0.4.0-dev"
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -33,8 +36,10 @@ func run(args []string) int {
 	validateOnly := fs.Bool("validate", false, "load and validate verbs.yaml then exit")
 	tokenPath := fs.String("token-file", auth.DefaultFileName, "path to agent token file (0600)")
 	dataDir := fs.String("data-dir", ".", "base directory for token/logs/db relative paths")
-	policyPath := fs.String("policy-file", "", "approval-policy.json path (default: <data-dir>/.agent/approval-policy.json or $HOME/.agent/...)")
+	policyPath := fs.String("policy-file", "", "approval-policy.json path")
 	auditPath := fs.String("audit-log", "", "NDJSON audit log path (default: <data-dir>/logs/audit.log)")
+	dbPath := fs.String("db", "", "SQLite tasks db (default: <data-dir>/data/tasks.db)")
+	syncExec := fs.Bool("sync-exec", false, "run first attempt inline after approval (debug); default uses worker")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -54,7 +59,6 @@ func run(args []string) int {
 		fmt.Fprintf(os.Stderr, "dispatcher: catalog: %v\n", err)
 		return 1
 	}
-
 	if *validateOnly {
 		fmt.Printf("dispatcher-go %s\n", Version)
 		fmt.Printf("catalog: %s (%d verbs) OK\n", path, len(cat.ByName))
@@ -73,7 +77,6 @@ func run(args []string) int {
 
 	polFile := *policyPath
 	if polFile == "" {
-		// prefer data-dir, then home
 		cand := filepath.Join(*dataDir, ".agent", "approval-policy.json")
 		if _, err := os.Stat(cand); err == nil {
 			polFile = cand
@@ -98,20 +101,47 @@ func run(args []string) int {
 	}
 	defer alog.Close()
 
-	tasks := queue.NewMemory()
-	srv := api.New(cat, tok, tasks)
+	dPath := *dbPath
+	if dPath == "" {
+		dPath = filepath.Join(*dataDir, "data", "tasks.db")
+	}
+	if err := os.MkdirAll(filepath.Dir(dPath), 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "dispatcher: db dir: %v\n", err)
+		return 1
+	}
+	store, err := queue.OpenSQLite(dPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dispatcher: db: %v\n", err)
+		return 1
+	}
+	defer store.Close()
+
+	srv := api.New(cat, tok, store)
 	srv.Policy = policy
 	srv.Audit = alog
 	srv.Prompter = approve.DialogPrompter{}
+	srv.SyncExec = *syncExec
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	w := &worker.Worker{
+		Store:       store,
+		Catalog:     cat,
+		AuditLog:    alog,
+		Notifier:    notify.Termux{},
+		BackoffBase: time.Duration(cat.Daemon.BackoffBaseS * float64(time.Second)),
+		MaxJitter:   250 * time.Millisecond,
+		PollEvery:   200 * time.Millisecond,
+	}
+	go w.Run(ctx)
+
 	fmt.Printf("dispatcher-go %s listening on http://%s\n", Version, cat.Daemon.Listen)
 	fmt.Printf("catalog: %s (%d verbs)\n", path, len(cat.ByName))
 	fmt.Printf("token: %s\n", tokFile)
-	fmt.Printf("policy: %s (mode effective from merge)\n", polFile)
+	fmt.Printf("db: %s\n", dPath)
 	fmt.Printf("audit: %s\n", aPath)
+	fmt.Printf("worker: on (sync-exec=%v)\n", *syncExec)
 	if err := srv.ListenAndServe(ctx, cat.Daemon.Listen); err != nil && err != context.Canceled {
 		fmt.Fprintf(os.Stderr, "dispatcher: serve: %v\n", err)
 		return 1

@@ -23,17 +23,18 @@ import (
 type Server struct {
 	Catalog   *verbs.Catalog
 	Token     *auth.Token
-	Tasks     *queue.Memory
+	Tasks     queue.Store
 	Policy    approve.PolicyFile
 	Prompter  approve.Prompter
 	Audit     *audit.Logger
 	StartedAt time.Time
-	// SyncExec runs approval+exec inline before returning 202 (M2/M3).
+	// SyncExec runs approval+first-exec inline (tests / simple mode).
+	// When false, after approval the task is left pending for the worker.
 	SyncExec bool
 }
 
 // New constructs a server with dialog prompter by default.
-func New(cat *verbs.Catalog, tok *auth.Token, tasks *queue.Memory) *Server {
+func New(cat *verbs.Catalog, tok *auth.Token, tasks queue.Store) *Server {
 	return &Server{
 		Catalog:   cat,
 		Token:     tok,
@@ -80,9 +81,8 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		// Approval may block up to 120s.
-		WriteTimeout: 180 * time.Second,
-		BaseContext:  func(net.Listener) context.Context { return ctx },
+		WriteTimeout:      180 * time.Second,
+		BaseContext:       func(net.Listener) context.Context { return ctx },
 	}
 	errCh := make(chan error, 1)
 	go func() {
@@ -126,7 +126,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"queue_depth": s.Tasks.Depth(),
 		"cb_states":   map[string]any{},
 		"uptime_s":    int(time.Since(s.StartedAt).Seconds()),
-		"version":     "m3",
+		"version":     "m4",
 	})
 }
 
@@ -159,6 +159,10 @@ func (s *Server) handlePostVerb(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "unknown_verb", fmt.Sprintf("verb %q not found", name), "")
 		return
 	}
+	if s.Tasks.Depth() >= s.Catalog.Daemon.MaxQueueDepth {
+		writeErr(w, http.StatusServiceUnavailable, "queue_full", "task queue is full", "")
+		return
+	}
 	var body postVerbBody
 	if r.Body != nil {
 		dec := json.NewDecoder(r.Body)
@@ -173,8 +177,6 @@ func (s *Server) handlePostVerb(w http.ResponseWriter, r *http.Request) {
 	if body.Args == nil {
 		body.Args = map[string]any{}
 	}
-
-	// stdin must not be mirrored into args for secret hygiene
 	if v.StdinArg != nil {
 		delete(body.Args, v.StdinArg.Arg)
 	}
@@ -187,17 +189,31 @@ func (s *Server) handlePostVerb(w http.ResponseWriter, r *http.Request) {
 
 	redactedArgs := approve.RedactArgs(v, body.Args)
 	argsJSON, _ := json.Marshal(redactedArgs)
-	task := s.Tasks.Create(v.Name, argvRedacted, string(argsJSON))
+	maxRetries := s.Catalog.Daemon.MaxRetries
+	if v.Retries != nil {
+		maxRetries = *v.Retries
+	}
+	task, err := s.Tasks.Create(queue.CreateInput{
+		Verb:         v.Name,
+		ArgsJSON:     string(argsJSON),
+		Argv:         argv,
+		ArgvRedacted: argvRedacted,
+		Stdin:        body.Stdin,
+		MaxRetries:   maxRetries,
+	})
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), "")
+		return
+	}
 
 	_ = s.audit(audit.Event{
 		TaskID: task.ID, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
 		State: queue.StateAccepted, ArgvRedacted: argvRedacted, Approval: string(v.Approval),
 	})
 
-	if s.SyncExec {
-		s.runPipeline(r.Context(), task.ID, v, argv, argvRedacted, body.Stdin)
-		task, _ = s.Tasks.Get(task.ID)
-	}
+	// Approval runs inline; execution is SyncExec (inline once) or pending for worker.
+	s.runPipeline(r.Context(), task.ID, v, argv, argvRedacted, body.Stdin)
+	task, _ = s.Tasks.Get(task.ID)
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"task_id": task.ID,
@@ -226,13 +242,8 @@ func (s *Server) runPipeline(ctx context.Context, id string, v verbs.Verb, argv,
 		}
 		title := approve.DialogTitle(v.Name)
 		body := approve.DialogBody(v, argvRedacted)
-		// Guard: body must not contain stdin secret
 		if approve.ContainsSecret(body, stdin) {
-			body = approve.DialogBody(v, argvRedacted) // already redacted argv
-			// if stdin leaked into argv expansion, force marker-only body
-			if approve.ContainsSecret(body, stdin) {
-				body = v.Name + " " + approve.RedactedMarker
-			}
+			body = v.Name + " " + approve.RedactedMarker
 		}
 		res := prompter.Confirm(ctx, title, body, approve.DefaultPromptTimeout)
 		if res.TimedOut || res.Err != nil || !res.Approved {
@@ -270,15 +281,23 @@ func (s *Server) runPipeline(ctx context.Context, id string, v verbs.Verb, argv,
 		})
 	}
 
-	// stdin only when verb declares stdin_arg
 	runStdin := ""
 	if v.StdinArg != nil {
 		runStdin = stdin
 	}
-	s.execute(ctx, id, v, argv, argvRedacted, runStdin)
+
+	if !s.SyncExec {
+		_ = s.Tasks.Update(id, func(t *queue.Task) {
+			t.State = queue.StatePending
+			// persist stdin already on create
+		})
+		return
+	}
+	// SyncExec: single attempt inline (retries handled by worker on fail path in M4+ via re-queue optional)
+	s.executeOnce(ctx, id, v, argv, argvRedacted, runStdin)
 }
 
-func (s *Server) execute(ctx context.Context, id string, v verbs.Verb, argv, argvRedacted []string, stdin string) {
+func (s *Server) executeOnce(ctx context.Context, id string, v verbs.Verb, argv, argvRedacted []string, stdin string) {
 	_ = s.Tasks.Update(id, func(t *queue.Task) {
 		t.State = queue.StateExecuting
 		t.Attempt = 0
@@ -319,25 +338,33 @@ func (s *Server) execute(ctx context.Context, id string, v verbs.Verb, argv, arg
 		if v.Parser == verbs.ParserJSON || v.Parser == "" {
 			if parsed, err := execx.ParseJSON(res.Stdout); err == nil {
 				t.Result = parsed
+				b, _ := json.Marshal(parsed)
+				t.ResultJSON = string(b)
 			}
 		}
 		t.State = queue.StateExecuted
 		t.LastAttemptOutcome = "ok"
 	})
 	task, _ := s.Tasks.Get(id)
-	ev := audit.Event{
+	_ = s.audit(audit.Event{
 		TaskID: id, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
 		State: task.State, ArgvRedacted: argvRedacted, ExitCode: task.ExitCode,
 		LatencyMS: lat, Attempt: 0, Error: task.Error,
-	}
-	_ = s.audit(ev)
+	})
 }
 
 func (s *Server) audit(ev audit.Event) error {
-	if s.Audit == nil {
+	if s.Tasks == nil {
+		if s.Audit != nil {
+			return s.Audit.Log(ev)
+		}
 		return nil
 	}
-	return s.Audit.Log(ev)
+	if err := s.Tasks.AppendAudit(ev); err != nil {
+		return err
+	}
+	_, err := s.Tasks.DrainOutbox(s.Audit, 20)
+	return err
 }
 
 func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
@@ -376,15 +403,10 @@ func expandArgv(v verbs.Verb, args map[string]any, stdin string) (argv, redacted
 				redacted[i] = approve.RedactedMarker
 			}
 		}
-		// never allow raw stdin secret into argv even if mis-templated
-		if stdin != "" && strings.Contains(argv[i], stdin) && secrets != nil {
-			// if this token equals stdin secret, redact display
-			if argv[i] == stdin {
-				redacted[i] = approve.RedactedMarker
-			}
+		if stdin != "" && argv[i] == stdin {
+			redacted[i] = approve.RedactedMarker
 		}
 	}
-	_ = stdin
 	return argv, redacted, nil
 }
 

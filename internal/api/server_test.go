@@ -88,7 +88,9 @@ func setup(t *testing.T, prompter approve.Prompter) (*api.Server, string, *audit
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := api.New(cat, tok, queue.NewMemory())
+	store := queue.NewMemory()
+	store.SetLogger(log)
+	s := api.New(cat, tok, store)
 	s.SyncExec = true
 	s.Audit = log
 	if prompter != nil {

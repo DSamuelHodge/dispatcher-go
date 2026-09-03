@@ -20,7 +20,8 @@ internal/
   config/ verbs/ termuxallow/   # M1
   auth/ api/ execx/ queue/      # M2 (in-memory tasks; SQLite in M4)
   approve/ audit/               # M3
-  retry/ circuit/ streams/
+  queue/ (sqlite) worker/ retry/ notify/  # M4
+  circuit/ streams/
 verbs.yaml
 docs/adr/
 ```
@@ -32,7 +33,7 @@ Runtime (never committed): `.agent-token` (0600), `logs/audit.log`, `data/tasks.
 ```bash
 go test ./...
 go run ./cmd/dispatcher -validate
-go run ./cmd/dispatcher                 # listens on 127.0.0.1:8477
+go run ./cmd/dispatcher                 # listens on 127.0.0.1:8477 (worker on; use -sync-exec for inline)
 # token is created at ./.agent-token on first run
 curl -sS -H "X-Agent-Token: $(tr -d '\n' < .agent-token)" \
   -H 'Content-Type: application/json' \
@@ -41,5 +42,5 @@ curl -sS -H "X-Agent-Token: $(tr -d '\n' < .agent-token)" \
 
 Routes: `GET /v1/health`, `GET /v1/verbs`, `POST /v1/verbs/{name}`, `GET /v1/tasks/{id}`, `GET /v1/tasks`.
 
-Status: **M3 complete** (approval gate, redaction, policy merge, NDJSON audit).
-Durable SQLite queue is M4 — see issues #1–#7.
+Status: **M4 complete** (SQLite WAL queue, audit outbox, retry worker, exhaustion notify).
+Circuit-breaker + crash resume is M5 — see issues #1–#7.
