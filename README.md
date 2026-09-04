@@ -26,7 +26,7 @@ Single static binary, pure Go (no interpreter on-device).
 
     curl -sL https://raw.githubusercontent.com/DSamuelHodge/dispatcher-go/main/setup.sh | bash
 
-Installs the prebuilt `android-arm64` binary into `~/dispatcher-go`,
+Installs the prebuilt `android-arm64` binary (release `v0.8.0`) into `~/dispatcher-go`,
 picks a free loopback port from 8477 up, and installs the Termux:Boot
 hook. Reboot once, or start by hand:
 

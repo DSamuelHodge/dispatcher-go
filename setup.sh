@@ -12,7 +12,7 @@ set -eu
 
 REPO="${REPO:-DSamuelHodge/dispatcher-go}"
 REPO_REF="${REPO_REF:-main}"
-RELEASE_TAG="${RELEASE_TAG:-v0.7.0}"
+RELEASE_TAG="${RELEASE_TAG:-v0.8.0}"
 TAILCAT_RELEASE_TAG="${TAILCAT_RELEASE_TAG:-tailcat-v0.5.0}"
 INSTALL_TAILCAT="${INSTALL_TAILCAT:-0}"
 INSTALL_DIR="${INSTALL_DIR:-${HOME}/dispatcher-go}"
