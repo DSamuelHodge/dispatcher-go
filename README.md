@@ -1,17 +1,28 @@
-# On-device agent dispatcher — Go (Termux:API)
+# dispatcher-go — give an AI agent hands, not keys
 
-A loopback HTTP process that runs in Termux and is the only thing on the
-phone allowed to touch Termux:API. A separate "brain" (local script or
-remote model) calls typed verbs -- `battery.status`, `sms.send`,
-`location.once`, `sensor.stream`, ... -- instead of raw `termux-*` argv.
-The catalog carries tier, risk, approval, and an optional stdin hook;
-high-risk verbs stop on an on-device confirm dialog; every attempt is
-appended to `logs/audit.log` and committed to a SQLite outbox. This is
-the device body. The model does not hold SMS, camera, or keystore
-permission.
+Your phone can text, sense, locate, and notify. An AI "brain" wants to
+use those abilities, but raw shell access is all-or-nothing: one bad
+command and it reads your SMS or wipes storage with no record and no
+chance to stop it.
 
-Single static binary, pure Go (SQLite via `modernc.org/sqlite`, no CGO),
-76 verbs, no interpreter on-device.
+dispatcher-go is the single gatekeeper between the brain and your phone.
+The brain gets 76 safe, named verbs (`battery.status`, `sms.send`,
+`location.once`...). Dangerous ones pause for an on-device yes/no tap.
+Everything is written to an audit log. The model never holds SMS,
+camera, or keystore permission — the gatekeeper does.
+
+- **One thing touches Termux:API.** A loopback daemon (`127.0.0.1:8477`)
+  is the only process allowed near it.
+- **Typed verbs, not argv.** No shell, no raw `termux-*` strings from the
+  model; new capabilities are YAML-only additions.
+- **Humans approve danger.** High-risk verbs block on a `termux-dialog`
+  confirm; a policy file covers away/DND stretches without silencing the
+  scariest verbs.
+- **Every attempt is on record.** NDJSON audit log plus a crash-safe
+  SQLite outbox: accepted → approved/denied → result, with retry,
+  circuit-breaking, and resume after reboot.
+
+Single static binary, pure Go (no interpreter on-device).
 
 ## Install on device (Termux)
 
