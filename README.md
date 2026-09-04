@@ -42,25 +42,26 @@ restarting the daemon. Comparison is constant-time.
 ## the first time so Android's permission prompts can fire)
 
     TOKEN=$(cat ~/dispatcher-go/.agent-token)
-    curl -H "X-Agent-Token: $TOKEN" http://127.0.0.1:8477/v1/health
-    curl -H "X-Agent-Token: $TOKEN" http://127.0.0.1:8477/v1/verbs
+    PORT=8477  # or whichever free port setup.sh printed
+    curl -H "X-Agent-Token: $TOKEN" http://127.0.0.1:$PORT/v1/health
+    curl -H "X-Agent-Token: $TOKEN" http://127.0.0.1:$PORT/v1/verbs
     curl -X POST -H "X-Agent-Token: $TOKEN" -H 'Content-Type: application/json' \
-      -d '{}' http://127.0.0.1:8477/v1/verbs/battery.status
+      -d '{}' http://127.0.0.1:$PORT/v1/verbs/battery.status
     # poll the task to completion
-    curl -H "X-Agent-Token: $TOKEN" http://127.0.0.1:8477/v1/tasks/<task_id>
+    curl -H "X-Agent-Token: $TOKEN" http://127.0.0.1:$PORT/v1/tasks/<task_id>
 
     # Tier B -- start a subscription, poll it, stop it
     ID=$(curl -X POST -H "X-Agent-Token: $TOKEN" -H 'Content-Type: application/json' \
       -d '{"verb": "sensor.stream", "args": {"name": "accelerometer"}}' \
-      http://127.0.0.1:8477/v1/streams | python -c 'import sys,json;print(json.load(sys.stdin)["stream_id"])')
-    curl -H "X-Agent-Token: $TOKEN" http://127.0.0.1:8477/v1/streams/$ID?since=
-    curl -X DELETE -H "X-Agent-Token: $TOKEN" http://127.0.0.1:8477/v1/streams/$ID
+      http://127.0.0.1:$PORT/v1/streams | grep -o '"stream_id":"[^"]*"' | cut -d'"' -f4)
+    curl -H "X-Agent-Token: $TOKEN" http://127.0.0.1:$PORT/v1/streams/$ID?since=
+    curl -X DELETE -H "X-Agent-Token: $TOKEN" http://127.0.0.1:$PORT/v1/streams/$ID
 
     # high-risk verb -- this will pop a termux-dialog confirm on the phone
     # and block until you tap yes/no (120s timeout denies)
     curl -X POST -H "X-Agent-Token: $TOKEN" -H 'Content-Type: application/json' \
       -d '{"args": {"number": "+15551234567"}, "stdin": "test"}' \
-      http://127.0.0.1:8477/v1/verbs/sms.send
+      http://127.0.0.1:$PORT/v1/verbs/sms.send
 
 Repeat POSTs are safe: pass `"idempotency_key": "<uuid>"` and a replay
 returns the original result (`replay: true`); a different payload under
@@ -96,6 +97,14 @@ the full approval surface (`daemon_mode`, `policy_mode`,
 `effective_global`, `force_ask_names`, per-verb counts) -- there is no
 single "effective mode for all verbs".
 
+The policy file is one object; a missing file means "no override":
+
+    {"approval_mode": "always-approve"}   # or "ask"; anything else fails startup
+
+Point the daemon at it with `-policy-file ~/.agent/approval-policy.json`.
+Use it for away/DND stretches, then delete or flip back to `"ask"` --
+`force_ask` verbs still prompt either way.
+
 ## Audit log and durability
 
 Every call attempt is appended to `logs/audit.log` as newline-delimited
@@ -118,5 +127,37 @@ On restart the daemon resumes: `executing` → `pending`, stale `accepted`
     go vet ./...
     go run ./cmd/dispatcher -catalog verbs.yaml -validate
 
+## Flags
+
+    -data-dir    base dir for .agent-token, logs/, data/ (default ".")
+    -catalog     path to verbs.yaml (default ./verbs.yaml)
+    -token-file  agent token path (default <data-dir>/.agent-token)
+    -policy-file approval-policy.json path (default none)
+    -audit-log   NDJSON audit path (default <data-dir>/logs/audit.log)
+    -db          SQLite tasks db (default <data-dir>/data/tasks.db)
+    -sync-exec   run first attempt inline after approval (debug; default: worker)
+    -validate    load and check verbs.yaml, then exit
+    -version     print version and exit
+
+## Troubleshooting
+
+- `connection refused` -- daemon isn't running, or you're on the wrong
+  port (re-check what setup.sh printed; another dispatcher may own 8477).
+- `401 unauthorized` -- wrong/missing `X-Agent-Token`; re-read
+  `~/dispatcher-go/.agent-token` (no trailing newline issues: use
+  `$(cat ...)` unquoted only inside the header string as shown).
+- Confirm dialog never appears -- device must be unlocked the first time;
+  the Termux:API app must be installed or `termux-dialog` times out to
+  deny after 120s.
+- Verb fails with `executable file not found in $PATH` -- the `termux-api`
+  package isn't installed (`pkg install termux-api`) or the Termux:API
+  app is missing.
+- `503 queue_full` -- worker isn't draining (check `logs/daemon.stderr`);
+  `503 circuit_open` -- verb tripped its breaker after repeated failures,
+  resolves after the cooldown or a restart.
+- Boot hook doesn't fire -- the Termux:Boot *app* must be installed and
+  the device rebooted once after placing `~/.termux/boot/01-start-agent`.
+
 Spec, requirements, and design records: [`spec.md`](spec.md),
-[`SRS.md`](SRS.md), [`docs/adr/`](docs/adr/).
+[`SRS.md`](SRS.md), [`docs/adr/`](docs/adr/),
+[`SECURITY.md`](SECURITY.md), [`LICENSE`](LICENSE).
