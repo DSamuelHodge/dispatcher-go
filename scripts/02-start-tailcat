@@ -1,0 +1,19 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# Termux:Boot hook — install as ~/.termux/boot/02-start-tailcat
+# Serves the dispatcher over tailcat after device boot.
+set -eu
+HOME="${HOME:-/data/data/com.termux/files/home}"
+DISPATCHER_HOME="${DISPATCHER_HOME:-$HOME/dispatcher-go}"
+SERVE="${DISPATCHER_HOME}/scripts/tailcat-serve.sh"
+LOGDIR="${DISPATCHER_HOME}/logs"
+mkdir -p "$LOGDIR"
+if [ ! -x "$SERVE" ]; then
+  echo "02-start-tailcat: $SERVE missing (re-run setup.sh)" >>"$LOGDIR/tailcat.stdout"
+  exit 1
+fi
+if pgrep -f 'tailcat serve' >/dev/null 2>&1; then
+  exit 0
+fi
+termux-wake-lock 2>/dev/null || true
+INSTALL_DIR="$DISPATCHER_HOME" nohup sh "$SERVE" \
+  >>"$LOGDIR/tailcat.stdout" 2>>"$LOGDIR/tailcat.stderr" &

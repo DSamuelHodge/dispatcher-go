@@ -169,6 +169,64 @@ On restart the daemon resumes: `executing` → `pending`, stale `accepted`
 - Boot hook doesn't fire -- the Termux:Boot *app* must be installed and
   the device rebooted once after placing `~/.termux/boot/01-start-agent`.
 
+## Remote access: give a remote agent the phone (tailcat)
+
+On-device daemons serve phones; remote agents need hands and eyes. The
+transport is [tailcat](https://github.com/tailscale/tailcat) — WireGuard
+encryption + NAT traversal with no accounts, no tailnet, no root, all
+userspace (perfect for unrooted Termux). The phone serves its loopback
+dispatcher port; the agent forwards it locally. `dispatcher-go` itself
+doesn't change: loopback bind, token auth, and audit all stay as-is.
+
+```
+phone (Termux)                              agent machine
+dispatcher 127.0.0.1:8477 ◄── tailcat serve ──WireGuard/DERP──► tailcat forward ──► 127.0.0.1:18477
+   (unchanged)          ▲                                                        │
+              --allow=<agent key>                                      curl + X-Agent-Token
+```
+
+Three independent credentials: the `tc...` address (capability), the
+client-key allowlist (the server silently ignores anyone else), and the
+dispatcher token. Rotate any one alone.
+
+**Phone (Termux):**
+
+    INSTALL_TAILCAT=1 bash setup.sh   # or re-run with the env var to add tailcat later
+    tailcat genkey --key=dispatcher --fixed-region   # prints tc... address (stable)
+    # agent side: tailcat genkey --client --key=agent-phone-1  (prints nodekey:...)
+    echo 'nodekey:PASTE-AGENT-KEY' > ~/dispatcher-go/.tailcat-allow
+    sh ~/dispatcher-go/scripts/tailcat-serve.sh      # supervised; address printed on start
+    cp scripts/02-start-tailcat ~/.termux/boot/     # serve across reboots (needs Termux:Boot app)
+
+Without `.tailcat-allow` (or `TAILCAT_ALLOW`) the serve script refuses
+to run — it never serves to bare address-holders.
+
+**Agent:**
+
+    tailcat forward tcPASTE-ADDRESS 18477:8477 &
+    curl -H "X-Agent-Token: $TOKEN" http://127.0.0.1:18477/v1/health
+
+`scripts/tailcat-forward.sh` wraps this with a `ping --until-direct`
+pre-check and reconnect backoff: `tailcat-forward.sh <tc-addr>`.
+
+**Full autonomy posture.** Remote agents get no dialog taps, so the
+phone runs global `always-approve` (`{"approval_mode":
+"always-approve"}` policy file) **plus** `-unattended`
+(`DISPATCHER_UNATTENDED=1` also works). Either alone changes nothing
+for high-risk verbs; together, per-verb `ask` and `force_ask` gates are
+overridden to approve. Every bypassed approval audits
+`unattended:true`, and `/v1/health` reports
+`approval.unattended`/`unattended_high_risk` — check it remotely to
+confirm the posture you think is running. Without `-unattended`, gated
+verbs time out to denied when no human is present.
+
+**Caveats.** tailcat has no CLI/wire stability promises — the release
+pins v0.5.0. Public DERP relays are rate-limited and metadata-logged
+(payload stays WireGuard-encrypted); self-host `derper` later if
+throughput or privacy demands it. Keep `termux-wake-lock` on and expect
+tunnel flaps on network switches — the agent must treat dial failures
+as "phone unreachable" and retry.
+
 Spec, requirements, and design records: [`spec.md`](spec.md),
 [`SRS.md`](SRS.md), [`docs/adr/`](docs/adr/),
 [`SECURITY.md`](SECURITY.md), [`LICENSE`](LICENSE).

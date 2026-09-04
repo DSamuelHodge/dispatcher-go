@@ -13,6 +13,8 @@ set -eu
 REPO="${REPO:-DSamuelHodge/dispatcher-go}"
 REPO_REF="${REPO_REF:-main}"
 RELEASE_TAG="${RELEASE_TAG:-v0.7.0}"
+TAILCAT_RELEASE_TAG="${TAILCAT_RELEASE_TAG:-tailcat-v0.5.0}"
+INSTALL_TAILCAT="${INSTALL_TAILCAT:-0}"
 INSTALL_DIR="${INSTALL_DIR:-${HOME}/dispatcher-go}"
 PREFIX_DIR="${PREFIX:-/data/data/com.termux/files/usr}"
 BIN_DIR="${BIN_DIR:-${PREFIX_DIR}/bin}"
@@ -101,6 +103,24 @@ fi
 
 "$BIN" -catalog "${INSTALL_DIR}/verbs.yaml" -data-dir "$INSTALL_DIR" -validate \
   || die "catalog validation failed"
+
+if [ "$INSTALL_TAILCAT" = "1" ]; then
+  echo "-> installing tailcat (remote access)"
+  curl -fSL --retry 2 -o "${BIN_DIR}/tailcat.new" \
+    "https://github.com/${REPO}/releases/download/${TAILCAT_RELEASE_TAG}/tailcat-android-arm64" \
+    || die "tailcat download failed"
+  chmod 700 "${BIN_DIR}/tailcat.new"
+  mv -f "${BIN_DIR}/tailcat.new" "${BIN_DIR}/tailcat"
+  mkdir -p "${INSTALL_DIR}/scripts"
+  curl -fsSL -o "${INSTALL_DIR}/scripts/tailcat-serve.sh" "${RAW}/scripts/tailcat-serve.sh" || die "tailcat-serve.sh download failed"
+  curl -fsSL -o "${BOOT_DIR}/02-start-tailcat" "${RAW}/scripts/02-start-tailcat" || die "tailcat boot hook download failed"
+  chmod 700 "${INSTALL_DIR}/scripts/tailcat-serve.sh" "${BOOT_DIR}/02-start-tailcat"
+  echo "-> tailcat installed; REMOTE-ACCESS NEXT STEPS (see README):"
+  echo "   1. ${BIN_DIR}/tailcat genkey --key=dispatcher --fixed-region   # prints tc... address"
+  echo "   2. agent: tailcat genkey --client --key=agent-phone-1           # prints nodekey:..."
+  echo "   3. echo 'nodekey:...' > ${INSTALL_DIR}/.tailcat-allow"
+  echo "   4. sh ${INSTALL_DIR}/scripts/tailcat-serve.sh"
+fi
 
 echo
 echo "installed to ${INSTALL_DIR}"
