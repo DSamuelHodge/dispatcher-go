@@ -3,7 +3,10 @@
 # Starts dispatcher-go after device boot; crash-resume runs inside the daemon.
 set -eu
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
-HOME="${HOME:-/data/data/com.termux/files/home}"
+# NOTE: do not trust $HOME here — under adb run-as or boot contexts HOME can
+# point at /data/user/0/com.termux instead of the real Termux home. Anchor to
+# the known Termux files dir; override explicitly via DISPATCHER_HOME.
+HOME="/data/data/com.termux/files/home"
 DISPATCHER_HOME="${DISPATCHER_HOME:-$HOME/dispatcher-go}"
 BIN="${DISPATCHER_BIN:-$PREFIX/bin/dispatcher-go}"
 # Daemon inherits this shell's PATH for termux-* lookup — make it explicit:
@@ -21,13 +24,20 @@ if [ -f "${DISPATCHER_HOME}/.unattended" ]; then
 fi
 LOGDIR="${DISPATCHER_HOME}/logs"
 mkdir -p "$LOGDIR" "$DISPATCHER_HOME/data"
+# Always-on: hold a partial wakelock so the daemon survives screen-off/doze;
+# without this Android kills the listener within minutes of the display sleep.
+# Best-effort: requires the Termux:API app; if missing, start without the lock.
+if command -v termux-wake-lock >/dev/null 2>&1; then
+  termux-wake-lock || echo "01-start-agent: termux-wake-lock failed; daemon may be killed by doze" >&2
+fi
 # avoid duplicate if already running
 if pgrep -f 'dispatcher-go' >/dev/null 2>&1; then
   exit 0
 fi
+# Detach from the boot shell so the daemon isn't tied to its lifecycle.
 # shellcheck disable=SC2086
-nohup "$BIN" \
+setsid nohup "$BIN" \
   -data-dir "$DISPATCHER_HOME" \
   -catalog "${DISPATCHER_HOME}/verbs.yaml" \
   $EXTRA \
-  >>"$LOGDIR/daemon.stdout" 2>>"$LOGDIR/daemon.stderr" &
+  >>"$LOGDIR/daemon.stdout" 2>>"$LOGDIR/daemon.stderr" </dev/null &

@@ -45,6 +45,22 @@ if ! pkg install -y termux-api; then
   echo "setup.sh: pkg install termux-api failed; continuing -- install the Termux:API app + package or verbs will fail at runtime" >&2
 fi
 
+# Always-on: hold a wakelock now so this session's daemon (started manually
+# below) survives screen-off; the boot hook re-acquires it after reboot.
+if command -v termux-wake-lock >/dev/null 2>&1; then
+  termux-wake-lock || echo "setup.sh: termux-wake-lock failed; daemon may be killed by doze" >&2
+else
+  echo "setup.sh: termux-wake-lock unavailable (Termux:API app missing?); daemon may be killed by doze" >&2
+fi
+# Best-effort: ask Android to exempt Termux from battery optimization so
+# doze doesn't kill the daemon. Opens a system dialog the user must accept.
+if command -v termux-battery-optimization >/dev/null 2>&1; then
+  termux-battery-optimization 2>/dev/null || true
+elif command -v am >/dev/null 2>&1; then
+  am start -a android.settings.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS \
+    -d "package:com.termux" >/dev/null 2>&1 || true
+fi
+
 # Pick the first free loopback port: anything answering HTTP (even 404/401)
 # means occupied; connection-refused means free.
 PORT=8477
@@ -93,7 +109,8 @@ fi
 echo "-> fetching verbs.yaml + boot hook (${REPO_REF})"
 curl -fsSL -o "${INSTALL_DIR}/verbs.yaml" "${RAW}/verbs.yaml" || die "verbs.yaml download failed"
 curl -fsSL -o "${BOOT_DIR}/01-start-agent" "${RAW}/scripts/01-start-agent" || die "boot hook download failed"
-chmod 700 "${BOOT_DIR}/01-start-agent"
+curl -fsSL -o "${BOOT_DIR}/02-agent-watchdog" "${RAW}/scripts/02-agent-watchdog" || die "watchdog hook download failed"
+chmod 700 "${BOOT_DIR}/01-start-agent" "${BOOT_DIR}/02-agent-watchdog"
 cp -a "$0" "${INSTALL_DIR}/setup.sh" 2>/dev/null || curl -fsSL -o "${INSTALL_DIR}/setup.sh" "${RAW}/setup.sh" || true
 
 if [ "$PORT" != "8477" ]; then
@@ -127,6 +144,7 @@ echo "installed to ${INSTALL_DIR}"
 echo "binary:   ${BIN} ($("$BIN" -version 2>/dev/null || echo dispatcher-go))"
 echo "start:    ${BIN} -data-dir ${INSTALL_DIR} -catalog ${INSTALL_DIR}/verbs.yaml"
 echo "boot:     Termux:Boot will run ~/.termux/boot/01-start-agent after reboot"
+echo "watchdog: ~/.termux/boot/02-agent-watchdog restarts the daemon if killed"
 echo "token:    cat ${INSTALL_DIR}/.agent-token   (created on first start)"
 echo
 echo "smoke:"

@@ -1,0 +1,25 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# Termux:Boot hook — install as ~/.termux/boot/02-agent-watchdog
+# Always-on safety net: if the dispatcher dies (OOM, doze, bulletin-board
+# kills), restart it. The wakelock in 01-start-agent prevents most of this;
+# this covers the remainder.
+set -u
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+# NOTE: do not trust inherited HOME — under adb run-as contexts HOME can point
+# at /data/user/0/com.termux, breaking BOOT_DIR and the restart path.
+HOME="/data/data/com.termux/files/home"
+export PATH="$PREFIX/bin:/system/bin:/system/xbin${PATH:+:$PATH}"
+BOOT_DIR="${HOME}/.termux/boot"
+LOG="${HOME}/dispatcher-go/logs/watchdog.log"
+INTERVAL="${WATCHDOG_INTERVAL:-60}"
+
+mkdir -p "$(dirname "$LOG")"
+echo "$(date -u +%FT%TZ) watchdog start (interval=${INTERVAL}s)" >>"$LOG"
+
+while true; do
+  if ! pgrep -f 'dispatcher-go' >/dev/null 2>&1; then
+    echo "$(date -u +%FT%TZ) dispatcher-go not running; restarting via 01-start-agent" >>"$LOG"
+    sh "${BOOT_DIR}/01-start-agent" >>"$LOG" 2>&1 || true
+  fi
+  sleep "$INTERVAL"
+done
