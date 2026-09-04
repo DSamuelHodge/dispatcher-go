@@ -1,4 +1,4 @@
-# dispatcher-go — give an AI agent hands, not keys
+# Give your AI agent eyes, hands, ears, not keys.
 
 Your phone can text, sense, locate, and notify. An AI "brain" wants to
 use those abilities, but raw shell access is all-or-nothing: one bad
