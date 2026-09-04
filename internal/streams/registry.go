@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,18 @@ import (
 
 	"github.com/DSamuelHodge/dispatcher-go/internal/verbs"
 )
+
+// MaxBufferSize caps the per-stream ring buffer (watch.buffer).
+const MaxBufferSize = 4096
+
+// MaxStreams caps concurrent active streams per registry.
+const MaxStreams = 16
+
+// ErrTooManyStreams is returned by Start when active streams >= MaxStreams.
+var ErrTooManyStreams = errors.New("too many streams")
+
+// ErrInvalidBuffer is returned by Start when the resolved buffer is <= 0 or > MaxBufferSize.
+var ErrInvalidBuffer = errors.New("invalid stream buffer size")
 
 // Stream is one live subscription.
 type Stream struct {
@@ -51,17 +64,16 @@ func (r *Registry) Start(v verbs.Verb, argv []string) (*Stream, error) {
 	if len(argv) == 0 {
 		return nil, fmt.Errorf("empty argv")
 	}
-	buf := r.defaultBuf
-	// watch buffer from verb if present
-	if m, ok := v.Watch.(map[string]any); ok {
-		if b, ok := m["buffer"].(int); ok && b > 0 {
-			buf = b
-		}
-		// yaml may decode numbers as int or float
-		if b, ok := m["buffer"].(float64); ok && b > 0 {
-			buf = int(b)
-		}
+	buf, err := resolveBuffer(v.Watch, r.defaultBuf)
+	if err != nil {
+		return nil, err
 	}
+	r.mu.Lock()
+	if len(r.streams) >= MaxStreams {
+		r.mu.Unlock()
+		return nil, ErrTooManyStreams
+	}
+	r.mu.Unlock()
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Env = os.Environ()
@@ -89,9 +101,99 @@ func (r *Registry) Start(v verbs.Verb, argv []string) (*Stream, error) {
 	}
 	go s.readLoop(stdout)
 	r.mu.Lock()
+	if len(r.streams) >= MaxStreams {
+		r.mu.Unlock()
+		// Raced past the cap while the process was starting: tear it down
+		// without registering so the count stays bounded.
+		s.Kill()
+		return nil, ErrTooManyStreams
+	}
 	r.streams[id] = s
 	r.mu.Unlock()
 	return s, nil
+}
+
+// resolveBuffer maps watch.buffer (YAML) plus the registry default into a
+// validated ring capacity in [1, MaxBufferSize].
+func resolveBuffer(watch any, def int) (int, error) {
+	if def <= 0 || def > MaxBufferSize {
+		return 0, fmt.Errorf("%w: %d (want 1..%d)", ErrInvalidBuffer, def, MaxBufferSize)
+	}
+	buf := def
+	switch w := watch.(type) {
+	case nil:
+		// no override
+	case map[string]any:
+		raw, ok := w["buffer"]
+		if !ok {
+			break
+		}
+		n, ok := asInt(raw)
+		if !ok {
+			// Non-numeric buffer: ignore and keep default (preserves old
+			// behavior for unexpected YAML shapes; validation of the
+			// catalog schema itself lives in internal/verbs).
+			break
+		}
+		if n <= 0 || n > MaxBufferSize {
+			return 0, fmt.Errorf("%w: %d (want 1..%d)", ErrInvalidBuffer, n, MaxBufferSize)
+		}
+		buf = n
+	case verbs.Watch:
+		if w.Buffer == 0 {
+			break // unset
+		}
+		if w.Buffer <= 0 || w.Buffer > MaxBufferSize {
+			return 0, fmt.Errorf("%w: %d (want 1..%d)", ErrInvalidBuffer, w.Buffer, MaxBufferSize)
+		}
+		buf = w.Buffer
+	case *verbs.Watch:
+		if w == nil || w.Buffer == 0 {
+			break
+		}
+		if w.Buffer <= 0 || w.Buffer > MaxBufferSize {
+			return 0, fmt.Errorf("%w: %d (want 1..%d)", ErrInvalidBuffer, w.Buffer, MaxBufferSize)
+		}
+		buf = w.Buffer
+	default:
+		// Unknown watch shape: keep default.
+	}
+	if buf <= 0 || buf > MaxBufferSize {
+		return 0, fmt.Errorf("%w: %d (want 1..%d)", ErrInvalidBuffer, buf, MaxBufferSize)
+	}
+	return buf, nil
+}
+
+// asInt coerces YAML/JSON numeric shapes into an int.
+func asInt(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int8:
+		return int(n), true
+	case int16:
+		return int(n), true
+	case int32:
+		return int(n), true
+	case int64:
+		return int(n), true
+	case uint:
+		return int(n), true
+	case uint8:
+		return int(n), true
+	case uint16:
+		return int(n), true
+	case uint32:
+		return int(n), true
+	case uint64:
+		return int(n), true
+	case float32:
+		return int(n), true
+	case float64:
+		return int(n), true
+	default:
+		return 0, false
+	}
 }
 
 func (s *Stream) readLoop(rc io.ReadCloser) {
@@ -110,6 +212,15 @@ func (s *Stream) readLoop(rc io.ReadCloser) {
 		s.mu.Unlock()
 	}
 	_ = s.cmd.Wait()
+}
+
+// Err returns the scanner/read-loop failure for a stream, if any.
+// A non-nil error (e.g. bufio "token too long" past the 1MB scanner limit)
+// means the stream is dead: no further events will arrive.
+func (s *Stream) Err() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.err
 }
 
 // Get returns a stream by id.
@@ -162,7 +273,10 @@ func (r *Registry) Count() int {
 	return len(r.streams)
 }
 
-// CloseAll stops every stream (daemon shutdown).
+// CloseAll stops every stream (daemon shutdown) concurrently.
+// Each Kill can block up to 2s; with N capped at MaxStreams (16) a serial
+// close would worst-case take ~32s and blow past shutdown grace, so fan out
+// and wait. Delete is safe for concurrent use.
 func (r *Registry) CloseAll() {
 	r.mu.Lock()
 	ids := make([]string, 0, len(r.streams))
@@ -170,9 +284,15 @@ func (r *Registry) CloseAll() {
 		ids = append(ids, id)
 	}
 	r.mu.Unlock()
+	var wg sync.WaitGroup
 	for _, id := range ids {
-		_ = r.Delete(id)
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			_ = r.Delete(id)
+		}(id)
 	}
+	wg.Wait()
 }
 
 func newID() string {

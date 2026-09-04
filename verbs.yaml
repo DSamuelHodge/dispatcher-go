@@ -222,6 +222,8 @@ verbs:
     risk: medium
     approval: inherit
     argv: ["termux-location", "-p", "{{.provider}}", "-r", "updates"]
+    args:
+      - {name: provider, flag: -p, type: string, required: false}
     watch:
       mode: stream
       buffer: 128
@@ -232,6 +234,8 @@ verbs:
     risk: low
     approval: inherit
     argv: ["termux-sensor", "-s", "{{.sensor}}"]
+    args:
+      - {name: sensor, flag: -s, type: string, required: false}
     watch:
       mode: stream
       buffer: 128

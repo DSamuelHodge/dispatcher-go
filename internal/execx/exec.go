@@ -39,20 +39,40 @@ func Run(ctx context.Context, argv []string, stdin string, timeout time.Duration
 		defer cancel()
 	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	// Inherit env so PATH finds termux-* (or test shim).
+	// Keep inheriting the full environment: Termux binaries rely on
+	// os.Environ() (PATH and friends) to resolve termux-* helpers.
 	cmd.Env = os.Environ()
+	// Run the child in its own process group so a timeout can kill the
+	// whole process tree, not just the direct child. No-op on platforms
+	// without process-group support (see pgroup_*.go).
+	configureProcessGroup(cmd)
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// If the context expires (one-shot timeout or caller cancel),
+	// exec.CommandContext kills only the direct child. Kill the whole
+	// process group promptly so orphaned grandchildren don't survive.
+	stopWatch := make(chan struct{})
+	defer close(stopWatch)
+	go func() {
+		select {
+		case <-ctx.Done():
+			killProcessGroup(cmd)
+		case <-stopWatch:
+		}
+	}()
 	err := cmd.Run()
 	res := Result{
 		Stdout: truncate(stdout.String(), MaxCapture),
 		Stderr: truncate(stderr.String(), MaxCapture),
 	}
 	if ctx.Err() == context.DeadlineExceeded {
+		// Belt-and-suspenders: the watcher may have raced with Run
+		// returning, so ensure the group is dead before reporting.
+		killProcessGroup(cmd)
 		res.TimedOut = true
 		res.ExitCode = -1
 		res.Err = fmt.Errorf("timeout after %s", timeout)

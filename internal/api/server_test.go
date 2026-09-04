@@ -436,3 +436,143 @@ func TestStreamLifecycle(t *testing.T) {
 		t.Fatalf("want 404 got %d", gres.StatusCode)
 	}
 }
+
+func postVerbHelper(t *testing.T, base, tok, verb, payload string) (int, []byte) {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, base+"/v1/verbs/"+verb, bytes.NewReader([]byte(payload)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(auth.Header, tok)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	return res.StatusCode, body
+}
+
+func TestIdempotencyReplayAndConflict(t *testing.T) {
+	s, base, _, cleanup := setup(t, nil)
+	defer cleanup()
+	tok := s.Token.String()
+
+	st1, b1 := postVerbHelper(t, base, tok, "battery.status", `{"idempotency_key":"k-1"}`)
+	if st1 != http.StatusAccepted {
+		t.Fatalf("first=%d %s", st1, b1)
+	}
+	var first struct {
+		TaskID string `json:"task_id"`
+	}
+	_ = json.Unmarshal(b1, &first)
+
+	st2, b2 := postVerbHelper(t, base, tok, "battery.status", `{"idempotency_key":"k-1"}`)
+	if st2 != http.StatusOK {
+		t.Fatalf("replay=%d %s", st2, b2)
+	}
+	var second struct {
+		TaskID string `json:"task_id"`
+		Status string `json:"status"`
+		Replay bool   `json:"replay"`
+	}
+	_ = json.Unmarshal(b2, &second)
+	if !second.Replay || second.TaskID != first.TaskID {
+		t.Fatalf("want replay of %s, got %+v", first.TaskID, second)
+	}
+	if n := len(s.Tasks.List("")); n != 1 {
+		t.Fatalf("tasks=%d, want 1 (no duplicate)", n)
+	}
+
+	// Same key, different request → 409.
+	st3, b3 := postVerbHelper(t, base, tok, "sms.send",
+		`{"args":{"number":"123"},"idempotency_key":"k-1"}`)
+	if st3 != http.StatusConflict {
+		t.Fatalf("conflict=%d %s", st3, b3)
+	}
+	if !strings.Contains(string(b3), "idempotency_conflict") {
+		t.Fatalf("%s", b3)
+	}
+}
+
+func TestSyncExecFailureSchedulesRetry(t *testing.T) {
+	s, base, _, cleanup := setup(t, nil)
+	defer cleanup()
+	// Shadow the succeeding shim with a failing one.
+	dir := t.TempDir()
+	writeShim(t, dir, "termux-battery-status", "#!/bin/sh\nexit 3\n")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	st, body := postVerbHelper(t, base, s.Token.String(), "battery.status", `{}`)
+	if st != http.StatusAccepted {
+		t.Fatalf("status=%d %s", st, body)
+	}
+	var out struct {
+		TaskID string `json:"task_id"`
+		Status string `json:"status"`
+	}
+	_ = json.Unmarshal(body, &out)
+	if out.Status != queue.StateRetryScheduled {
+		t.Fatalf("status=%s, want retry_scheduled (spec §9, not terminal failed)", out.Status)
+	}
+	got, ok := s.Tasks.Get(out.TaskID)
+	if !ok {
+		t.Fatal("task lost")
+	}
+	if got.Attempt != 1 || got.NextRunAt == nil {
+		t.Fatalf("attempt=%d next=%v, want 1 + scheduled", got.Attempt, got.NextRunAt)
+	}
+	if got.LastAttemptOutcome != "failed" || got.Error != "exit status 3" {
+		t.Fatalf("outcome=%q err=%q", got.LastAttemptOutcome, got.Error)
+	}
+}
+
+func injectLocationStream(t *testing.T, s *api.Server, dir string, approval verbs.Approval) {
+	t.Helper()
+	writeShim(t, dir, "termux-location", "#!/bin/sh\nwhile true; do echo loc; sleep 0.05; done\n")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	s.Catalog.ByName["location.stream"] = verbs.Verb{
+		Name: "location.stream", Tier: verbs.TierB, Risk: verbs.RiskMedium,
+		Approval: approval,
+		Argv:     []string{"termux-location", "-p", "gps", "-r", "updates"},
+		Watch:    map[string]any{"mode": "stream", "buffer": float64(8)},
+	}
+	s.Catalog.Order = append(s.Catalog.Order, "location.stream")
+}
+
+func postStreamHelper(t *testing.T, base, tok string) (int, []byte) {
+	t.Helper()
+	payload, _ := json.Marshal(map[string]any{"verb": "location.stream", "args": map[string]any{}})
+	req, _ := http.NewRequest(http.MethodPost, base+"/v1/streams", bytes.NewReader(payload))
+	req.Header.Set(auth.Header, tok)
+	req.Header.Set("Content-Type", "application/json")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	return res.StatusCode, body
+}
+
+func TestStreamRequiresApproval(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip()
+	}
+	// Denied prompter → 403, no stream started.
+	s, base, _, cleanup := setup(t, approve.StaticPrompter{Approve: false})
+	defer cleanup()
+	s.Streams = streams.NewRegistry(8)
+	injectLocationStream(t, s, t.TempDir(), verbs.ApprovalAsk)
+	if st, body := postStreamHelper(t, base, s.Token.String()); st != http.StatusForbidden {
+		t.Fatalf("denied stream: status=%d %s, want 403", st, body)
+	}
+
+	// Approved prompter → 202.
+	s2, base2, _, cleanup2 := setup(t, approve.StaticPrompter{Approve: true})
+	defer cleanup2()
+	s2.Streams = streams.NewRegistry(8)
+	injectLocationStream(t, s2, t.TempDir(), verbs.ApprovalAsk)
+	st, body := postStreamHelper(t, base2, s2.Token.String())
+	if st != http.StatusAccepted {
+		t.Fatalf("approved stream: status=%d %s, want 202", st, body)
+	}
+}

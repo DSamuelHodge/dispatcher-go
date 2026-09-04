@@ -44,7 +44,10 @@ func LoadPolicy(path string) (PolicyFile, error) {
 	if err := json.Unmarshal(data, &p); err != nil {
 		return p, fmt.Errorf("parse approval policy: %w", err)
 	}
-	switch strings.TrimSpace(p.ApprovalMode) {
+	// Normalize surrounding whitespace so " always-approve " behaves like
+	// "always-approve" instead of falling through to the ask branch.
+	p.ApprovalMode = strings.TrimSpace(p.ApprovalMode)
+	switch p.ApprovalMode {
 	case "", string(ModeAsk), string(ModeAlwaysApprove):
 	default:
 		return p, fmt.Errorf("approval_policy.approval_mode must be ask|always-approve, got %q", p.ApprovalMode)
@@ -80,10 +83,11 @@ func Resolve(v verbs.Verb, daemon config.Daemon, policy PolicyFile) Decision {
 		return Decision{Mode: ModeAlwaysApprove, NeedsPrompt: false, By: "policy", Reason: "per-verb always-approve"}
 	}
 
-	// inherit → policy file then daemon
-	global := string(daemon.ApprovalMode)
-	if policy.ApprovalMode != "" {
-		global = policy.ApprovalMode
+	// inherit → policy file then daemon (both trimmed: callers may build
+	// PolicyFile by hand, and config values may carry stray whitespace).
+	global := strings.TrimSpace(string(daemon.ApprovalMode))
+	if strings.TrimSpace(policy.ApprovalMode) != "" {
+		global = strings.TrimSpace(policy.ApprovalMode)
 	}
 	switch Mode(global) {
 	case ModeAlwaysApprove:
@@ -94,6 +98,15 @@ func Resolve(v verbs.Verb, daemon config.Daemon, policy PolicyFile) Decision {
 		// Practical MVP: ask only when risk is medium|high OR tier B. Tier A risk none with ask would be noisy.
 		// Spec FR-4 says ask mode for gated verbs; seed uses inherit for Tier A. Interpret:
 		// needs prompt when effective mode is ask AND (tier B OR risk medium/high OR force already handled).
+		//
+		// DECISION (pinned by test, do not change casually): under global ask,
+		// Tier A verbs with risk none/low pass through with zero prompt
+		// ("tier A low-risk passthrough under ask"). Rationale: prompting for
+		// every read-only/low-risk Tier A verb would make ask mode unusably
+		// noisy, and Tier A verbs are read-only by construction. Tier A with
+		// risk medium/high, and ALL Tier B verbs, still gate. If this
+		// passthrough ever needs tightening, change `need` below and update
+		// TestResolveTierRiskMatrix accordingly.
 		need := v.Tier == verbs.TierB || v.Risk == verbs.RiskMedium || v.Risk == verbs.RiskHigh
 		if !need {
 			return Decision{Mode: ModeAlwaysApprove, NeedsPrompt: false, By: "policy", Reason: "tier A low-risk passthrough under ask"}

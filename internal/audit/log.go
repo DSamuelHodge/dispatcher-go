@@ -27,13 +27,21 @@ type Event struct {
 	Error        string   `json:"error,omitempty"`
 }
 
+// maxMemEvents bounds the in-memory ring used by Mem/Contains (test and
+// debug aid — the file is the durable record). Only the newest entries are
+// kept so long-running daemons cannot grow memory without bound.
+const maxMemEvents = 1000
+
 // Logger appends NDJSON lines.
 type Logger struct {
-	mu      sync.Mutex
+	// mu serializes file writes + fsync so lines never interleave.
+	mu sync.Mutex
+	// memMu guards Mem only, so Contains readers never block on fsync.
+	memMu   sync.RWMutex
 	path    string
-	f       *os.File
+	f       *os.File // guarded by mu
 	Mem     []Event
-	MemOnly bool
+	MemOnly bool // immutable after Open; safe to read lock-free
 }
 
 // Open creates/appends to path. Empty path ⇒ memory-only.
@@ -75,21 +83,41 @@ func (l *Logger) Log(ev Event) error {
 	if ev.TS == "" {
 		ev.TS = time.Now().UTC().Format(time.RFC3339Nano)
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.Mem = append(l.Mem, ev)
-	if l.MemOnly || l.f == nil {
+	// In-memory record first (matches prior order: Mem holds the event even
+	// if marshaling or the file write below fails).
+	l.appendMem(ev)
+	if l.MemOnly {
 		return nil
 	}
+	// Marshal outside the file lock: ev is a local copy, so this is safe and
+	// keeps slow fsync lines from holding the lock during encoding.
 	b, err := json.Marshal(ev)
 	if err != nil {
 		return err
 	}
 	b = append(b, '\n')
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.f == nil {
+		return nil
+	}
 	if _, err := l.f.Write(b); err != nil {
 		return err
 	}
 	return l.f.Sync()
+}
+
+// appendMem records ev, keeping only the newest maxMemEvents entries.
+func (l *Logger) appendMem(ev Event) {
+	l.memMu.Lock()
+	defer l.memMu.Unlock()
+	l.Mem = append(l.Mem, ev)
+	if len(l.Mem) > maxMemEvents {
+		// Drop oldest; copy down so the backing array stays bounded instead
+		// of growing with every subsequent append.
+		copy(l.Mem, l.Mem[len(l.Mem)-maxMemEvents:])
+		l.Mem = l.Mem[:maxMemEvents]
+	}
 }
 
 // Contains reports whether any in-memory event JSON contains substr.
@@ -97,9 +125,13 @@ func (l *Logger) Contains(substr string) bool {
 	if l == nil || substr == "" {
 		return false
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	for _, ev := range l.Mem {
+	// Copy under a read lock, then marshal/search without holding it, so
+	// readers never block writers (or fsync) longer than a slice copy.
+	l.memMu.RLock()
+	cp := make([]Event, len(l.Mem))
+	copy(cp, l.Mem)
+	l.memMu.RUnlock()
+	for _, ev := range cp {
 		b, _ := json.Marshal(ev)
 		if strings.Contains(string(b), substr) {
 			return true

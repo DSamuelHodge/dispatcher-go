@@ -2,6 +2,7 @@ package queue
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -13,6 +14,7 @@ type Memory struct {
 	mu     sync.Mutex
 	tasks  map[string]*Task
 	audit  []audit.Event
+	idem   map[string]IdempotencyRecord
 	logger *audit.Logger // optional mirror
 }
 
@@ -41,6 +43,9 @@ func (m *Memory) Create(in CreateInput) (*Task, error) {
 		UpdatedAt:    now,
 	}
 	m.mu.Lock()
+	if m.tasks == nil {
+		m.tasks = make(map[string]*Task)
+	}
 	m.tasks[t.ID] = t
 	m.mu.Unlock()
 	return cloneTask(t), nil
@@ -65,6 +70,13 @@ func (m *Memory) List(state string) []*Task {
 			out = append(out, cloneTask(t))
 		}
 	}
+	// Deterministic created_at order, matching SQLite ClaimDue/List.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
 	return out
 }
 
@@ -98,13 +110,14 @@ func (m *Memory) ClaimDue(now time.Time) (*Task, error) {
 	defer m.mu.Unlock()
 	var pick *Task
 	for _, t := range m.tasks {
-		if t.State == StatePending {
-			pick = t
-			break
+		due := t.State == StatePending ||
+			(t.State == StateRetryScheduled && (t.NextRunAt == nil || !t.NextRunAt.After(now)))
+		if !due {
+			continue
 		}
-		if t.State == StateRetryScheduled && t.NextRunAt != nil && !t.NextRunAt.After(now) {
+		if pick == nil || t.CreatedAt.Before(pick.CreatedAt) ||
+			(t.CreatedAt.Equal(pick.CreatedAt) && t.ID < pick.ID) {
 			pick = t
-			break
 		}
 	}
 	if pick == nil {
@@ -131,6 +144,76 @@ func (m *Memory) AppendAudit(ev audit.Event) error {
 
 func (m *Memory) DrainOutbox(log *audit.Logger, limit int) (int, error) {
 	return 0, nil
+}
+
+// CreateAndAudit inserts a task and records its audit event under one lock.
+func (m *Memory) CreateAndAudit(in CreateInput, ev audit.Event) (*Task, error) {
+	t, err := m.Create(in)
+	if err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	if ev.TaskID == "" {
+		ev.TaskID = t.ID
+	}
+	m.audit = append(m.audit, ev)
+	m.mu.Unlock()
+	if m.logger != nil {
+		if err := m.logger.Log(ev); err != nil {
+			return nil, err
+		}
+	}
+	return t, nil
+}
+
+// UpdateAndAudit applies fn and records the audit event under one lock.
+func (m *Memory) UpdateAndAudit(id string, fn func(*Task), ev audit.Event) error {
+	m.mu.Lock()
+	if m.tasks == nil {
+		m.mu.Unlock()
+		return fmt.Errorf("task %q not found", id)
+	}
+	t, ok := m.tasks[id]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("task %q not found", id)
+	}
+	fn(t)
+	t.UpdatedAt = nowUTC()
+	if ev.TaskID == "" {
+		ev.TaskID = id
+	}
+	m.audit = append(m.audit, ev)
+	m.mu.Unlock()
+	if m.logger != nil {
+		return m.logger.Log(ev)
+	}
+	return nil
+}
+
+// FindIdempotency looks up a client idempotency key.
+func (m *Memory) FindIdempotency(key string) (IdempotencyRecord, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec, ok := m.idem[key]
+	return rec, ok, nil
+}
+
+// SaveIdempotency records a key binding; duplicate keys are an error.
+func (m *Memory) SaveIdempotency(rec IdempotencyRecord) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.idem == nil {
+		m.idem = make(map[string]IdempotencyRecord)
+	}
+	if _, dup := m.idem[rec.Key]; dup {
+		return fmt.Errorf("idempotency key %q already claimed", rec.Key)
+	}
+	if rec.CreatedAt.IsZero() {
+		rec.CreatedAt = nowUTC()
+	}
+	m.idem[rec.Key] = rec
+	return nil
 }
 
 func (m *Memory) Close() error { return nil }

@@ -30,6 +30,13 @@ func LoadOrCreate(path string) (*Token, error) {
 	}
 	data, err := os.ReadFile(path)
 	if err == nil {
+		// Fail closed: refuse to use a token file that is readable beyond
+		// the owner (any group/other permission bits set).
+		if st, serr := os.Stat(path); serr != nil {
+			return nil, fmt.Errorf("stat token: %w", serr)
+		} else if st.Mode().Perm()&0o077 != 0 {
+			return nil, fmt.Errorf("token file %q has overly permissive mode %04o (must be 0600)", path, st.Mode().Perm())
+		}
 		s := strings.TrimSpace(string(data))
 		if s == "" {
 			return nil, fmt.Errorf("token file %q is empty", path)

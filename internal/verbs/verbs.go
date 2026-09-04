@@ -2,6 +2,7 @@
 package verbs
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -118,16 +119,22 @@ func Load(path string) (*Catalog, error) {
 func Parse(data []byte) (*Catalog, error) {
 	var f File
 	f.Daemon = config.Default()
-	if err := yaml.Unmarshal(data, &f); err != nil {
+	// Strict decoding: typos like `timeou_s` fail fast instead of being
+	// silently ignored. Applies to File, Daemon, Verb, ArgSpec, StdinArg.
+	// (Watch decodes into `any`, so its keys are checked in validateWatch.)
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&f); err != nil {
 		return nil, fmt.Errorf("parse verbs.yaml: %w", err)
 	}
 	if f.Version != SchemaVersion {
 		return nil, fmt.Errorf("verbs.yaml version: want %d, got %d", SchemaVersion, f.Version)
 	}
-	// Fill zero daemon fields from defaults without wiping explicit zeros incorrectly:
-	// yaml already merged onto Default() only for missing keys if we set Default first —
-	// but Unmarshal overwrites the whole struct. Re-apply defaults for zero values.
-	f.Daemon = applyDaemonDefaults(f.Daemon)
+	// Fill daemon fields from defaults without wiping an explicit zero:
+	// presence detection distinguishes `max_retries: 0` (honored as no-retry)
+	// from an omitted key (default 5). Other numeric daemon fields must be > 0
+	// per Validate, so zero there always means "unset".
+	f.Daemon = applyDaemonDefaults(f.Daemon, daemonFieldPresent(data, "max_retries"))
 	if err := f.Daemon.Validate(); err != nil {
 		return nil, err
 	}
@@ -169,7 +176,7 @@ func Parse(data []byte) (*Catalog, error) {
 	return cat, nil
 }
 
-func applyDaemonDefaults(d config.Daemon) config.Daemon {
+func applyDaemonDefaults(d config.Daemon, maxRetriesSet bool) config.Daemon {
 	def := config.Default()
 	if d.Listen == "" {
 		d.Listen = def.Listen
@@ -182,12 +189,6 @@ func applyDaemonDefaults(d config.Daemon) config.Daemon {
 	}
 	if d.TaskTimeoutS == 0 {
 		d.TaskTimeoutS = def.TaskTimeoutS
-	}
-	if d.MaxRetries == 0 && d.MaxRetries != def.MaxRetries {
-		// MaxRetries 0 is valid (no retries); only fill if completely unset is indistinguishable.
-		// YAML explicit 0 stays 0. Default applied only when file omitted daemon block fields
-		// that remain zero AND we cannot distinguish — for MaxRetries, treat negative as invalid
-		// and leave 0 as explicit. If entire daemon missing, Default() was not partially applied.
 	}
 	// Use sentinel: if backoff/cb still zero, fill.
 	if d.BackoffBaseS == 0 {
@@ -208,13 +209,38 @@ func applyDaemonDefaults(d config.Daemon) config.Daemon {
 	if d.TaskTimeoutS == 0 {
 		d.TaskTimeoutS = def.TaskTimeoutS
 	}
-	// MaxRetries: if daemon block omitted max_retries, yaml leaves 0. Spec default is 5.
-	// We cannot distinguish omitted vs explicit 0 without yaml.Node. MVP: 0 means default 5;
-	// set retries: 0 on a verb to disable. Documented in verbs.yaml comments.
-	if d.MaxRetries == 0 {
+	// MaxRetries: explicit 0 means no retries and is honored. Only when the
+	// key is absent do we fill the spec default (5). Per-verb `retries` uses
+	// *int for the same reason: nil inherits the daemon default at runtime.
+	if !maxRetriesSet && d.MaxRetries == 0 {
 		d.MaxRetries = def.MaxRetries
 	}
 	return d
+}
+
+// daemonFieldPresent reports whether the top-level `daemon:` mapping in data
+// explicitly sets the given key, distinguishing `max_retries: 0` from omitted.
+func daemonFieldPresent(data []byte, key string) bool {
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return false
+	}
+	if len(root.Content) == 0 {
+		return false
+	}
+	doc := root.Content[0] // document node → mapping
+	for i := 0; i+1 < len(doc.Content); i += 2 {
+		if doc.Content[i].Value != "daemon" {
+			continue
+		}
+		daemon := doc.Content[i+1]
+		for j := 0; j+1 < len(daemon.Content); j += 2 {
+			if daemon.Content[j].Value == key {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func validateVerb(v Verb, d config.Daemon) error {
@@ -257,8 +283,14 @@ func validateVerb(v Verb, d config.Daemon) error {
 			return fmt.Errorf("tier A must not use mutating binary %q", argv0)
 		}
 		// NFC write flag is mutating even on a non-mutating-classified binary.
+		// Strip `=value` the same way flag validation does, so `-w=x`
+		// cannot evade this check while passing as a known flag.
 		for _, tok := range v.Argv[1:] {
-			if argv0 == "termux-nfc" && tok == "-w" {
+			flag := tok
+			if eq := strings.IndexByte(tok, '='); eq > 0 {
+				flag = tok[:eq]
+			}
+			if argv0 == "termux-nfc" && flag == "-w" {
 				return fmt.Errorf("tier A must not use mutating argv flag -w on termux-nfc")
 			}
 		}
@@ -269,6 +301,9 @@ func validateVerb(v Verb, d config.Daemon) error {
 	if v.TimeoutS < 0 {
 		return fmt.Errorf("timeout_s must be >= 0")
 	}
+	if v.Retries != nil && *v.Retries < 0 {
+		return fmt.Errorf("retries must be >= 0")
+	}
 	if v.TimeoutS == 0 {
 		// inherit daemon default at runtime; ok at load
 		_ = d
@@ -278,7 +313,7 @@ func validateVerb(v Verb, d config.Daemon) error {
 	default:
 		return fmt.Errorf("parser must be json|text|exit, got %q", v.Parser)
 	}
-	if err := validateWatch(v.Watch); err != nil {
+	if err := validateWatch(v); err != nil {
 		return err
 	}
 	for _, a := range v.Args {
@@ -295,8 +330,28 @@ func validateVerb(v Verb, d config.Daemon) error {
 	return nil
 }
 
-func validateWatch(w any) error {
+// streamVerbs maps the only verbs allowed to declare `watch: {mode: stream}`
+// to their required argv0 binary.
+var streamVerbs = map[string]string{
+	"location.stream": "termux-location",
+	"sensor.stream":   "termux-sensor",
+}
+
+func validateWatch(v Verb) error {
+	w := v.Watch
 	if w == nil {
+		return nil
+	}
+	// Only location.stream and sensor.stream may stream; anything else
+	// declaring mode stream is rejected even if the watch shape is valid.
+	requireStreamAllowlisted := func() error {
+		wantBin, ok := streamVerbs[v.Name]
+		if !ok {
+			return fmt.Errorf("watch.mode stream is only allowed for location.stream and sensor.stream, got verb %q", v.Name)
+		}
+		if len(v.Argv) == 0 || v.Argv[0] != wantBin {
+			return fmt.Errorf("watch.mode stream verb %q must use binary %q", v.Name, wantBin)
+		}
 		return nil
 	}
 	switch t := w.(type) {
@@ -306,11 +361,16 @@ func validateWatch(w any) error {
 		}
 		return nil
 	case map[string]any:
+		for k := range t {
+			if k != "mode" && k != "buffer" {
+				return fmt.Errorf("watch: unknown field %q", k)
+			}
+		}
 		mode, _ := t["mode"].(string)
 		if mode != "stream" {
 			return fmt.Errorf("watch.mode must be stream, got %q", mode)
 		}
-		return nil
+		return requireStreamAllowlisted()
 	default:
 		// yaml may decode nested struct via map only with any; accept Watch-shaped via remarshal
 		b, err := yaml.Marshal(w)
@@ -318,11 +378,16 @@ func validateWatch(w any) error {
 			return fmt.Errorf("watch: %w", err)
 		}
 		var ww Watch
-		if err := yaml.Unmarshal(b, &ww); err != nil {
+		dec := yaml.NewDecoder(bytes.NewReader(b))
+		dec.KnownFields(true)
+		if err := dec.Decode(&ww); err != nil {
 			return fmt.Errorf("watch: %w", err)
 		}
 		if ww.Mode != "" && ww.Mode != "stream" {
 			return fmt.Errorf("watch.mode must be stream, got %q", ww.Mode)
+		}
+		if ww.Mode == "stream" {
+			return requireStreamAllowlisted()
 		}
 		return nil
 	}

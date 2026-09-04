@@ -20,7 +20,7 @@ type Termux struct{}
 func (Termux) Exhausted(ctx context.Context, verb, taskID string, attempts int) error {
 	title := fmt.Sprintf("dispatcher: %s exhausted", verb)
 	content := fmt.Sprintf("task %s after %d attempts", taskID, attempts)
-	argv := []string{"termux-notification", "--title", title, "-c", content}
+	argv := []string{"termux-notification", "-t", title, "-c", content}
 	res := execx.Run(ctx, argv, "", 15*time.Second)
 	if res.Err != nil {
 		return res.Err

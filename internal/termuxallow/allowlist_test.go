@@ -29,3 +29,19 @@ func TestIsMutating(t *testing.T) {
 		t.Fatal("sms-send should be mutating")
 	}
 }
+
+func TestValidateArgvEqualsFlagForm(t *testing.T) {
+	// `-w=x` strips to the known `-w` flag, so it passes flag validation
+	// (the mutating check lives in verbs tier validation).
+	if err := termuxallow.ValidateArgv([]string{"termux-nfc", "-w=x"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateArgvEmptyTemplateToken(t *testing.T) {
+	// "{{}}" is not a placeholder; as a positional it is still allowed,
+	// so validation outcome is unchanged.
+	if err := termuxallow.ValidateArgv([]string{"termux-toast", "{{}}"}); err != nil {
+		t.Fatal(err)
+	}
+}

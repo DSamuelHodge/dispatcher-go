@@ -21,10 +21,15 @@ type Breaker struct {
 	state         State
 	failures      int
 	openedAt      time.Time
-	halfOpenTrial bool // true while a half-open probe is in flight
+	halfOpenTrial bool      // true while a half-open probe is in flight
+	trialStarted  time.Time // when the current half-open probe was granted
 	TripThreshold int
 	OpenFor       time.Duration
-	now           func() time.Time
+	// ProbeTimeout bounds how long a half-open probe may stay outstanding
+	// before Allow() permits a fresh probe. Defaults to 2x OpenFor.
+	// Zero means "use the default".
+	ProbeTimeout time.Duration
+	now          func() time.Time
 }
 
 // New returns a closed breaker.
@@ -39,8 +44,27 @@ func New(trip int, openFor time.Duration) *Breaker {
 		state:         Closed,
 		TripThreshold: trip,
 		OpenFor:       openFor,
+		ProbeTimeout:  2 * openFor,
 		now:           time.Now,
 	}
+}
+
+// SetNowFunc overrides the clock used for open/half-open transitions and
+// probe-lease expiry. Intended for tests; pass nil to keep the current clock.
+func (b *Breaker) SetNowFunc(fn func() time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if fn != nil {
+		b.now = fn
+	}
+}
+
+// probeTimeoutLocked returns the effective probe lease duration.
+func (b *Breaker) probeTimeoutLocked() time.Duration {
+	if b.ProbeTimeout > 0 {
+		return b.ProbeTimeout
+	}
+	return 2 * b.OpenFor
 }
 
 // Snapshot is a read-only view for /v1/health.
@@ -70,9 +94,17 @@ func (b *Breaker) Allow() bool {
 		return false
 	case HalfOpen:
 		if b.halfOpenTrial {
-			return false // only one probe
+			// Probe lease: if the outstanding trial's verdict never
+			// arrives, don't wedge forever — expire the lease and
+			// permit a fresh probe.
+			if b.now().Sub(b.trialStarted) >= b.probeTimeoutLocked() {
+				b.halfOpenTrial = false
+			} else {
+				return false // only one probe
+			}
 		}
 		b.halfOpenTrial = true
+		b.trialStarted = b.now()
 		return true
 	default:
 		return true
@@ -85,6 +117,7 @@ func (b *Breaker) Success() {
 	defer b.mu.Unlock()
 	b.failures = 0
 	b.halfOpenTrial = false
+	b.trialStarted = time.Time{}
 	b.state = Closed
 }
 
@@ -96,6 +129,7 @@ func (b *Breaker) Failure() {
 		b.state = Open
 		b.openedAt = b.now()
 		b.halfOpenTrial = false
+		b.trialStarted = time.Time{}
 		b.failures = b.TripThreshold
 		return
 	}
@@ -104,6 +138,7 @@ func (b *Breaker) Failure() {
 		b.state = Open
 		b.openedAt = b.now()
 		b.halfOpenTrial = false
+		b.trialStarted = time.Time{}
 	}
 }
 
@@ -111,6 +146,7 @@ func (b *Breaker) maybeTransitionLocked() {
 	if b.state == Open && b.now().Sub(b.openedAt) >= b.OpenFor {
 		b.state = HalfOpen
 		b.halfOpenTrial = false
+		b.trialStarted = time.Time{}
 	}
 }
 

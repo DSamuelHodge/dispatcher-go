@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/DSamuelHodge/dispatcher-go/internal/approve"
 	"github.com/DSamuelHodge/dispatcher-go/internal/audit"
 	"github.com/DSamuelHodge/dispatcher-go/internal/circuit"
 	"github.com/DSamuelHodge/dispatcher-go/internal/execx"
@@ -64,12 +65,18 @@ func (w *Worker) tick(ctx context.Context) {
 }
 
 func (w *Worker) execute(ctx context.Context, task *queue.Task) {
+	defer w.drainAudit()
 	v, ok := w.Catalog.Get(task.Verb)
 	if !ok {
-		_ = w.Store.Update(task.ID, func(t *queue.Task) {
-			t.State = queue.StateFailed
+		// Unknown verb is a catalog skew, not an attempt outcome: land in
+		// the spec §9.1 terminal state (never phantom failed/timeout rows).
+		_ = w.Store.UpdateAndAudit(task.ID, func(t *queue.Task) {
+			t.State = queue.StateExhausted
 			t.Error = "unknown verb in catalog"
 			t.LastAttemptOutcome = "failed"
+		}, audit.Event{
+			TaskID: task.ID, Verb: task.Verb, State: queue.StateExhausted,
+			ArgvRedacted: task.ArgvRedacted, Error: "unknown verb in catalog",
 		})
 		return
 	}
@@ -83,14 +90,13 @@ func (w *Worker) execute(ctx context.Context, task *queue.Task) {
 		if !br.Allow() {
 			// requeue shortly — circuit open (exhaustion notify still bypasses via direct path)
 			next := time.Now().UTC().Add(time.Second)
-			_ = w.Store.Update(task.ID, func(t *queue.Task) {
+			_ = w.Store.UpdateAndAudit(task.ID, func(t *queue.Task) {
 				t.State = queue.StateRetryScheduled
 				t.NextRunAt = &next
 				t.Error = "circuit_open"
-			})
-			_ = w.audit(audit.Event{
-				TaskID: task.ID, Verb: task.Verb, State: "circuit_open",
-				ArgvRedacted: task.ArgvRedacted, Error: "circuit_open",
+			}, audit.Event{
+				TaskID: task.ID, Verb: task.Verb, Tier: string(v.Tier), Risk: string(v.Risk),
+				State: "circuit_open", ArgvRedacted: task.ArgvRedacted, Error: "circuit_open",
 			})
 			return
 		}
@@ -101,13 +107,25 @@ func (w *Worker) execute(ctx context.Context, task *queue.Task) {
 	}
 	n := task.Attempt
 	start := time.Now().UTC()
-	_ = w.audit(audit.Event{
+	_ = w.Store.UpdateAndAudit(task.ID, func(t *queue.Task) {
+		t.State = queue.StateExecuting
+	}, audit.Event{
 		TaskID: task.ID, Verb: task.Verb, Tier: string(v.Tier), Risk: string(v.Risk),
 		State: queue.StateExecuting, ArgvRedacted: task.ArgvRedacted, Attempt: n,
 	})
 	res := execx.Run(ctx, task.Argv(), task.StdinBlob, timeout)
 	end := time.Now().UTC()
 	lat := end.Sub(start).Milliseconds()
+	// Stdin bodies are never persisted second-hand: a child that echoes
+	// its input has its output withheld.
+	stdout := res.Stdout
+	if task.StdinBlob != "" && approve.ContainsSecret(stdout, task.StdinBlob) {
+		stdout = approve.RedactedMarker
+	}
+	stderr := res.Stderr
+	if task.StdinBlob != "" && approve.ContainsSecret(stderr, task.StdinBlob) {
+		stderr = approve.RedactedMarker
+	}
 
 	outcome := "ok"
 	errMsg := ""
@@ -135,12 +153,12 @@ func (w *Worker) execute(ctx context.Context, task *queue.Task) {
 		if v.Parser == verbs.ParserJSON || v.Parser == "" {
 			result, _ = execx.ParseJSON(res.Stdout)
 		}
-		_ = w.Store.Update(task.ID, func(t *queue.Task) {
+		_ = w.Store.UpdateAndAudit(task.ID, func(t *queue.Task) {
 			t.State = queue.StateExecuted
 			t.LastAttemptOutcome = "ok"
 			t.ExitCode = &ec
-			t.Stdout = res.Stdout
-			t.Stderr = res.Stderr
+			t.Stdout = stdout
+			t.Stderr = stderr
 			t.Result = result
 			if result != nil {
 				b, _ := json.Marshal(result)
@@ -148,15 +166,14 @@ func (w *Worker) execute(ctx context.Context, task *queue.Task) {
 			}
 			t.Error = ""
 			t.NextRunAt = nil
-		})
-		if br != nil {
-			br.Success()
-		}
-		_ = w.audit(audit.Event{
+		}, audit.Event{
 			TaskID: task.ID, Verb: task.Verb, Tier: string(v.Tier), Risk: string(v.Risk),
 			State: queue.StateExecuted, ArgvRedacted: task.ArgvRedacted, ExitCode: &ec,
 			LatencyMS: lat, Attempt: n,
 		})
+		if br != nil {
+			br.Success()
+		}
 		return
 	}
 
@@ -165,16 +182,15 @@ func (w *Worker) execute(ctx context.Context, task *queue.Task) {
 		br.Failure()
 	}
 	if retry.ShouldExhaust(n, maxRetries) {
-		_ = w.Store.Update(task.ID, func(t *queue.Task) {
+		_ = w.Store.UpdateAndAudit(task.ID, func(t *queue.Task) {
 			t.State = queue.StateExhausted
 			t.LastAttemptOutcome = outcome
 			t.ExitCode = &ec
-			t.Stdout = res.Stdout
-			t.Stderr = res.Stderr
+			t.Stdout = stdout
+			t.Stderr = stderr
 			t.Error = errMsg
 			t.NextRunAt = nil
-		})
-		_ = w.audit(audit.Event{
+		}, audit.Event{
 			TaskID: task.ID, Verb: task.Verb, Tier: string(v.Tier), Risk: string(v.Risk),
 			State: queue.StateExhausted, ArgvRedacted: task.ArgvRedacted, ExitCode: &ec,
 			LatencyMS: lat, Attempt: n, Error: errMsg,
@@ -185,21 +201,27 @@ func (w *Worker) execute(ctx context.Context, task *queue.Task) {
 
 	delay := retry.DelayAfterFailure(w.BackoffBase, n, w.MaxJitter)
 	next := time.Now().UTC().Add(delay)
-	_ = w.Store.Update(task.ID, func(t *queue.Task) {
+	_ = w.Store.UpdateAndAudit(task.ID, func(t *queue.Task) {
 		t.State = queue.StateRetryScheduled
 		t.LastAttemptOutcome = outcome
 		t.ExitCode = &ec
-		t.Stdout = res.Stdout
-		t.Stderr = res.Stderr
+		t.Stdout = stdout
+		t.Stderr = stderr
 		t.Error = errMsg
 		t.Attempt = n + 1
 		t.NextRunAt = &next
-	})
-	_ = w.audit(audit.Event{
+	}, audit.Event{
 		TaskID: task.ID, Verb: task.Verb, Tier: string(v.Tier), Risk: string(v.Risk),
 		State: "will-retry", ArgvRedacted: task.ArgvRedacted, ExitCode: &ec,
 		LatencyMS: lat, Attempt: n, Error: errMsg,
 	})
+}
+
+func (w *Worker) drainAudit() {
+	// Flush outbox rows appended by UpdateAndAudit: callers (and tests)
+	// may read the audit log synchronously after execute returns, and
+	// the next tick's drain may be a poll-interval away.
+	_, _ = w.Store.DrainOutbox(w.AuditLog, 50)
 }
 
 func (w *Worker) audit(ev audit.Event) error {

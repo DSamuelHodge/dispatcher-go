@@ -1,9 +1,11 @@
 package streams_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,4 +67,112 @@ func TestStartGetDelete(t *testing.T) {
 	}
 	// process should be dead
 	time.Sleep(50 * time.Millisecond)
+}
+
+func TestStartRejectsInvalidBuffer(t *testing.T) {
+	cases := map[string]any{
+		"zero":    0,
+		"neg":     -5,
+		"over":    4097,
+		"huge":    1 << 20,
+		"float":   float64(5000),
+		"float0":  float64(0),
+		"int64ov": int64(8192),
+	}
+	for name, buf := range cases {
+		t.Run(name, func(t *testing.T) {
+			v := verbs.Verb{Name: "location.stream", Watch: map[string]any{"mode": "stream", "buffer": buf}}
+			reg := streams.NewRegistry(128)
+			if _, err := reg.Start(v, []string{"sleep", "10"}); !errors.Is(err, streams.ErrInvalidBuffer) {
+				t.Fatalf("buffer=%v: want ErrInvalidBuffer, got %v", buf, err)
+			}
+			if reg.Count() != 0 {
+				t.Fatalf("count=%d, want 0", reg.Count())
+			}
+		})
+	}
+}
+
+func TestStartRejectsBadDefaultBuffer(t *testing.T) {
+	v := verbs.Verb{Name: "location.stream", Watch: map[string]any{"mode": "stream"}}
+	reg := streams.NewRegistry(8192)
+	if _, err := reg.Start(v, []string{"sleep", "10"}); !errors.Is(err, streams.ErrInvalidBuffer) {
+		t.Fatalf("want ErrInvalidBuffer, got %v", err)
+	}
+}
+
+func TestStartAcceptsMaxBuffer(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip()
+	}
+	v := verbs.Verb{Name: "location.stream", Watch: map[string]any{"mode": "stream", "buffer": 4096}}
+	reg := streams.NewRegistry(128)
+	s, err := reg.Start(v, []string{"sleep", "10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reg.CloseAll()
+	if s.Ring == nil {
+		t.Fatal("nil ring")
+	}
+	if err := reg.Delete(s.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStartCapsActiveStreams(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip()
+	}
+	reg := streams.NewRegistry(8)
+	defer reg.CloseAll()
+	v := verbs.Verb{Name: "location.stream", Watch: map[string]any{"mode": "stream", "buffer": 8}}
+	for i := 0; i < streams.MaxStreams; i++ {
+		if _, err := reg.Start(v, []string{"sleep", "10"}); err != nil {
+			t.Fatalf("start %d: %v", i, err)
+		}
+	}
+	if reg.Count() != streams.MaxStreams {
+		t.Fatalf("count=%d, want %d", reg.Count(), streams.MaxStreams)
+	}
+	if _, err := reg.Start(v, []string{"sleep", "10"}); !errors.Is(err, streams.ErrTooManyStreams) {
+		t.Fatalf("want ErrTooManyStreams, got %v", err)
+	}
+}
+
+func TestStreamErrSurfacesScannerLimit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip()
+	}
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "longline.sh")
+	// Single 1.1MB line exceeds the 1MB scanner limit -> "token too long".
+	script := "#!/bin/sh\nawk 'BEGIN{for(i=0;i<1100000;i++)printf \"A\"; printf \"\\n\"}'\nsleep 5\n"
+	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	v := verbs.Verb{Name: "sensor.stream", Watch: map[string]any{"mode": "stream", "buffer": 8}}
+	reg := streams.NewRegistry(8)
+	defer reg.CloseAll()
+	s, err := reg.Start(v, []string{shim})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Err(); got != nil {
+		t.Fatalf("fresh stream Err=%v, want nil", got)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	var serr error
+	for time.Now().Before(deadline) {
+		if serr = s.Err(); serr != nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if serr == nil {
+		t.Fatal("stream error never surfaced")
+	}
+	if !strings.Contains(serr.Error(), "too long") {
+		t.Fatalf("Err=%q, want it to mention \"too long\"", serr.Error())
+	}
 }

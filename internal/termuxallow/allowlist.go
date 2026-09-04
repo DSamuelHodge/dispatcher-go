@@ -131,15 +131,6 @@ func ValidateArgv(argv []string) error {
 			}
 		}
 	}
-	// NFC write mode is mutating even though the binary is listed read-capable.
-	if argv0 == "termux-nfc" {
-		for _, tok := range argv[1:] {
-			if tok == "-w" {
-				// Handled at verb tier validation via MutatingOverride if needed.
-				_ = tok
-			}
-		}
-	}
 	return nil
 }
 
@@ -153,7 +144,9 @@ func IsMutating(argv0 string) bool {
 }
 
 func isTemplate(s string) bool {
-	return len(s) >= 4 && s[0] == '{' && s[1] == '{' && s[len(s)-2] == '}' && s[len(s)-1] == '}'
+	// Require a non-empty template name: "{{}}" is not a placeholder.
+	// Safe: as a positional it is still allowed, so no validation outcome changes.
+	return len(s) >= 5 && s[0] == '{' && s[1] == '{' && s[len(s)-2] == '}' && s[len(s)-1] == '}'
 }
 
 func indexByte(s string, c byte) int {

@@ -81,3 +81,56 @@ func TestStaticPrompter(t *testing.T) {
 func TestParseConfirmViaStaticRaw(t *testing.T) {
 	// covered via DialogPrompter integration with PATH shim in api tests
 }
+
+func TestLoadPolicyTrimsWhitespace(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "approval-policy.json")
+	if err := os.WriteFile(p, []byte(`{"approval_mode":"  always-approve  "}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pol, err := approve.LoadPolicy(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pol.ApprovalMode != "always-approve" {
+		t.Fatalf("mode not trimmed: %q", pol.ApprovalMode)
+	}
+	// A padded global mode must not fall into the ask branch.
+	v := verbs.Verb{Name: "toast.show", Tier: verbs.TierB, Risk: verbs.RiskLow, Approval: verbs.ApprovalInherit}
+	d := config.Default()
+	d.ApprovalMode = config.ApprovalAsk
+	dec := approve.Resolve(v, d, approve.PolicyFile{ApprovalMode: "  always-approve\t\n"})
+	if dec.NeedsPrompt || dec.Mode != approve.ModeAlwaysApprove {
+		t.Fatalf("padded always-approve should passthrough: %+v", dec)
+	}
+}
+
+func TestResolveTierRiskMatrix(t *testing.T) {
+	d := config.Default()
+	d.ApprovalMode = config.ApprovalAsk
+	ask := approve.PolicyFile{}
+	cases := []struct {
+		name   string
+		tier   verbs.Tier
+		risk   verbs.Risk
+		prompt bool
+	}{
+		{"TierA none passthrough", verbs.TierA, verbs.RiskNone, false},
+		{"TierA low passthrough", verbs.TierA, verbs.RiskLow, false},
+		{"TierA medium gates", verbs.TierA, verbs.RiskMedium, true},
+		{"TierA high gates", verbs.TierA, verbs.RiskHigh, true},
+		{"TierB none gates", verbs.TierB, verbs.RiskNone, true},
+		{"TierB low gates", verbs.TierB, verbs.RiskLow, true},
+		{"TierB medium gates", verbs.TierB, verbs.RiskMedium, true},
+		{"TierB high gates", verbs.TierB, verbs.RiskHigh, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v := verbs.Verb{Name: "x.y", Tier: tc.tier, Risk: tc.risk, Approval: verbs.ApprovalInherit}
+			dec := approve.Resolve(v, d, ask)
+			if dec.NeedsPrompt != tc.prompt {
+				t.Fatalf("tier=%q risk=%q prompt=%v, want %v (%+v)", tc.tier, tc.risk, dec.NeedsPrompt, tc.prompt, dec)
+			}
+		})
+	}
+}

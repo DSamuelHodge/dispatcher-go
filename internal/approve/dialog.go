@@ -3,6 +3,7 @@ package approve
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -53,9 +54,15 @@ func (DialogPrompter) Confirm(ctx context.Context, title, body string, timeout t
 		out.Err = res.Err
 		// still try parse
 	}
-	ok, err := parseConfirmJSON(res.Stdout)
-	if err != nil {
-		out.Err = err
+	ok, perr := parseConfirmJSON(res.Stdout)
+	if perr != nil {
+		// Keep the underlying exec failure: an empty/unparseable stdout
+		// must not swallow the reason the dialog command failed.
+		if res.Err != nil {
+			out.Err = errors.Join(perr, res.Err)
+		} else {
+			out.Err = perr
+		}
 		return out
 	}
 	out.Approved = ok
@@ -81,6 +88,28 @@ func parseConfirmJSON(stdout string) (bool, error) {
 	if err := json.Unmarshal([]byte(s), &m); err != nil {
 		return false, fmt.Errorf("dialog json: %w", err)
 	}
+	// Cancellation wins over the text field: a dismissed dialog reports
+	// code -1, and {text:yes, code:-1} must deny, never approve.
+	if c, ok := m["code"]; ok {
+		switch v := c.(type) {
+		case float64:
+			if v == -1 {
+				return false, nil
+			}
+		case int:
+			if v == -1 {
+				return false, nil
+			}
+		case int64:
+			if v == -1 {
+				return false, nil
+			}
+		case json.Number:
+			if i, err := v.Int64(); err == nil && i == -1 {
+				return false, nil
+			}
+		}
+	}
 	// text field
 	if t, ok := m["text"]; ok {
 		ts := strings.ToLower(strings.TrimSpace(fmt.Sprint(t)))
@@ -89,19 +118,6 @@ func parseConfirmJSON(stdout string) (bool, error) {
 		}
 		if ts == "no" || ts == "n" || ts == "" {
 			return false, nil
-		}
-	}
-	// code == -1 canceled
-	if c, ok := m["code"]; ok {
-		switch v := c.(type) {
-		case float64:
-			if v == -1 {
-				return false, nil
-			}
-		case json.Number:
-			if i, err := v.Int64(); err == nil && i == -1 {
-				return false, nil
-			}
 		}
 	}
 	return false, nil

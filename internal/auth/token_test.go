@@ -37,3 +37,24 @@ func TestLoadOrCreateAndValid(t *testing.T) {
 		t.Fatalf("token perms too open: %v", st.Mode())
 	}
 }
+
+func TestLoadOrCreateRejectsPermissiveMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".agent-token")
+	if _, err := auth.LoadOrCreate(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := auth.LoadOrCreate(path); err == nil {
+		t.Fatal("expected error for group/other-readable token file")
+	}
+	// Owner-only modes still load.
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := auth.LoadOrCreate(path); err != nil {
+		t.Fatalf("0600 token should load: %v", err)
+	}
+}

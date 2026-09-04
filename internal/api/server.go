@@ -3,6 +3,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,7 +18,9 @@ import (
 	"github.com/DSamuelHodge/dispatcher-go/internal/auth"
 	"github.com/DSamuelHodge/dispatcher-go/internal/circuit"
 	"github.com/DSamuelHodge/dispatcher-go/internal/execx"
+	"github.com/DSamuelHodge/dispatcher-go/internal/notify"
 	"github.com/DSamuelHodge/dispatcher-go/internal/queue"
+	"github.com/DSamuelHodge/dispatcher-go/internal/retry"
 	"github.com/DSamuelHodge/dispatcher-go/internal/streams"
 	"github.com/DSamuelHodge/dispatcher-go/internal/verbs"
 )
@@ -33,6 +37,8 @@ type Server struct {
 	Streams   *streams.Registry
 	Resume    queue.ResumeStats
 	StartedAt time.Time
+	// Notifier delivers exhaustion alerts (defaults to Termux).
+	Notifier notify.Notifier
 	// SyncExec runs approval+first-exec inline (tests / simple mode).
 	// When false, after approval the task is left pending for the worker.
 	SyncExec bool
@@ -45,6 +51,7 @@ func New(cat *verbs.Catalog, tok *auth.Token, tasks queue.Store) *Server {
 		Token:     tok,
 		Tasks:     tasks,
 		Prompter:  approve.DialogPrompter{},
+		Notifier:  notify.Termux{},
 		StartedAt: time.Now().UTC(),
 		SyncExec:  true,
 	}
@@ -180,7 +187,7 @@ func (s *Server) handlePostVerb(w http.ResponseWriter, r *http.Request) {
 	}
 	var body postVerbBody
 	if r.Body != nil {
-		dec := json.NewDecoder(r.Body)
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&body); err != nil {
 			if err != io.EOF {
@@ -202,47 +209,100 @@ func (s *Server) handlePostVerb(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ADR-0003: idempotency key binds (verb, args, stdin) to one task.
+	reqHash := idempotencyHash(v.Name, body.Args, body.Stdin)
+	if body.IdempotencyKey != "" {
+		if Stockholder, found, err := s.Tasks.FindIdempotency(body.IdempotencyKey); err != nil {
+			writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), "")
+			return
+		} else if found {
+			if Stockholder.Verb != v.Name || Stockholder.RequestHash != reqHash {
+				writeErr(w, http.StatusConflict, "idempotency_conflict",
+					fmt.Sprintf("idempotency key already used for a different request (task %s)", Stockholder.TaskID), "")
+				return
+			}
+			if t, ok := s.Tasks.Get(Stockholder.TaskID); ok {
+				writeJSON(w, http.StatusOK, map[string]any{
+					"task_id": t.ID,
+					"status":  t.State,
+					"replay":  true,
+				})
+				return
+			}
+			// Task row gone: fall through and re-bind below.
+		}
+	}
+
 	redactedArgs := approve.RedactArgs(v, body.Args)
 	argsJSON, _ := json.Marshal(redactedArgs)
 	maxRetries := s.Catalog.Daemon.MaxRetries
 	if v.Retries != nil {
 		maxRetries = *v.Retries
 	}
-	if s.Circuits != nil {
-		trip := 0
-		if v.CircuitBreakerThreshold != nil {
-			trip = *v.CircuitBreakerThreshold
-		}
-		br := s.Circuits.For(v.Name, trip)
+	br := s.breakerFor(v)
+	if br != nil {
 		// Peek: if open and not yet half-open window, reject fast.
 		// Allow() would consume half-open slot — use Snapshot.
-		sn := br.Snapshot()
-		if sn.State == circuit.Open {
+		if sn := br.Snapshot(); sn.State == circuit.Open {
 			writeErr(w, http.StatusServiceUnavailable, "circuit_open", fmt.Sprintf("circuit open for %s", v.Name), "")
 			return
 		}
 	}
-	task, err := s.Tasks.Create(queue.CreateInput{
+	task, err := s.Tasks.CreateAndAudit(queue.CreateInput{
 		Verb:         v.Name,
 		ArgsJSON:     string(argsJSON),
 		Argv:         argv,
 		ArgvRedacted: argvRedacted,
 		Stdin:        body.Stdin,
 		MaxRetries:   maxRetries,
+	}, audit.Event{
+		Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
+		State: queue.StateAccepted, ArgvRedacted: argvRedacted, Approval: string(v.Approval),
 	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), "")
 		return
 	}
 
-	_ = s.audit(audit.Event{
-		TaskID: task.ID, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
-		State: queue.StateAccepted, ArgvRedacted: argvRedacted, Approval: string(v.Approval),
-	})
+	if body.IdempotencyKey != "" {
+		rec := queue.IdempotencyRecord{
+			Key: body.IdempotencyKey, Verb: v.Name, RequestHash: reqHash, TaskID: task.ID,
+		}
+		if err := s.Tasks.SaveIdempotency(rec); err != nil {
+			// Lost a same-key race: replay the winner, cancel our orphan
+			// (still accepted — approval hasn't run yet, so nothing executed).
+			if win, found, _ := s.Tasks.FindIdempotency(body.IdempotencyKey); found {
+				_ = s.Tasks.UpdateAndAudit(task.ID, func(t *queue.Task) {
+					t.State = queue.StateCanceled
+					t.Error = "superseded by idempotent replay"
+				}, audit.Event{
+					TaskID: task.ID, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
+					State: queue.StateCanceled, ArgvRedacted: argvRedacted, Error: "superseded by idempotent replay",
+				})
+				if t, ok := s.Tasks.Get(win.TaskID); ok {
+					writeJSON(w, http.StatusOK, map[string]any{
+						"task_id": t.ID,
+						"status":  t.State,
+						"replay":  true,
+					})
+					return
+				}
+			}
+			// Non-duplicate save error, or winner unreadable: continue
+			// with our own task (at-least-once beats dropping the request).
+		}
+	}
 
 	// Approval runs inline; execution is SyncExec (inline once) or pending for worker.
-	s.runPipeline(r.Context(), task.ID, v, argv, argvRedacted, body.Stdin)
-	task, _ = s.Tasks.Get(task.ID)
+	s.runPipeline(r.Context(), task.ID, v, br, argv, argvRedacted, body.Stdin)
+	taskID := task.ID
+	task, ok = s.Tasks.Get(taskID)
+	if !ok {
+		writeErr(w, http.StatusInternalServerError, "store_error", fmt.Sprintf("task %q lost after create", taskID), "")
+		return
+	}
+	// Flush the outbox rows appended by the pipeline above.
+	_, _ = s.Tasks.DrainOutbox(s.Audit, 20)
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"task_id": task.ID,
@@ -250,17 +310,41 @@ func (s *Server) handlePostVerb(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) runPipeline(ctx context.Context, id string, v verbs.Verb, argv, argvRedacted []string, stdin string) {
+// breakerFor returns the verb's circuit breaker, or nil when unconfigured.
+func (s *Server) breakerFor(v verbs.Verb) *circuit.Breaker {
+	if s.Circuits == nil {
+		return nil
+	}
+	trip := 0
+	if v.CircuitBreakerThreshold != nil {
+		trip = *v.CircuitBreakerThreshold
+	}
+	return s.Circuits.For(v.Name, trip)
+}
+
+// idempotencyHash binds verb + canonical args + stdin (hash only, secrets
+// never stored) to one request identity.
+func idempotencyHash(verb string, args map[string]any, stdin string) string {
+	canonical, _ := json.Marshal(args)
+	h := sha256.New()
+	h.Write([]byte(verb))
+	h.Write([]byte{0})
+	h.Write(canonical)
+	h.Write([]byte{0})
+	h.Write([]byte(stdin))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (s *Server) runPipeline(ctx context.Context, id string, v verbs.Verb, br *circuit.Breaker, argv, argvRedacted []string, stdin string) {
 	dec := approve.Resolve(v, s.Catalog.Daemon, s.Policy)
 	_ = s.Tasks.Update(id, func(t *queue.Task) {
 		t.ApprovalMode = string(dec.Mode)
 	})
 
 	if dec.NeedsPrompt {
-		_ = s.Tasks.Update(id, func(t *queue.Task) {
+		_ = s.Tasks.UpdateAndAudit(id, func(t *queue.Task) {
 			t.State = queue.StatePendingApproval
-		})
-		_ = s.audit(audit.Event{
+		}, audit.Event{
 			TaskID: id, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
 			State: queue.StatePendingApproval, ArgvRedacted: argvRedacted, Approval: string(dec.Mode),
 		})
@@ -282,29 +366,26 @@ func (s *Server) runPipeline(ctx context.Context, id string, v verbs.Verb, argv,
 			} else if res.Err != nil {
 				errMsg = res.Err.Error()
 			}
-			_ = s.Tasks.Update(id, func(t *queue.Task) {
+			_ = s.Tasks.UpdateAndAudit(id, func(t *queue.Task) {
 				t.State = queue.StateDenied
 				t.Error = errMsg
-			})
-			_ = s.audit(audit.Event{
+			}, audit.Event{
 				TaskID: id, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
 				State: queue.StateDenied, ArgvRedacted: argvRedacted, Approval: string(dec.Mode),
 				Error: errMsg,
 			})
 			return
 		}
-		_ = s.Tasks.Update(id, func(t *queue.Task) {
+		_ = s.Tasks.UpdateAndAudit(id, func(t *queue.Task) {
 			t.ApprovedBy = "user"
-		})
-		_ = s.audit(audit.Event{
+		}, audit.Event{
 			TaskID: id, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
 			State: "approved", ApprovedBy: "user", ArgvRedacted: argvRedacted, Approval: string(dec.Mode),
 		})
 	} else {
-		_ = s.Tasks.Update(id, func(t *queue.Task) {
+		_ = s.Tasks.UpdateAndAudit(id, func(t *queue.Task) {
 			t.ApprovedBy = dec.By
-		})
-		_ = s.audit(audit.Event{
+		}, audit.Event{
 			TaskID: id, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
 			State: "approved", ApprovedBy: dec.By, ArgvRedacted: argvRedacted, Approval: string(dec.Mode),
 		})
@@ -316,22 +397,29 @@ func (s *Server) runPipeline(ctx context.Context, id string, v verbs.Verb, argv,
 	}
 
 	if !s.SyncExec {
-		_ = s.Tasks.Update(id, func(t *queue.Task) {
+		_ = s.Tasks.UpdateAndAudit(id, func(t *queue.Task) {
 			t.State = queue.StatePending
 			// persist stdin already on create
+		}, audit.Event{
+			TaskID: id, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
+			State: queue.StatePending, ArgvRedacted: argvRedacted, Approval: string(dec.Mode),
 		})
 		return
 	}
-	// SyncExec: single attempt inline (retries handled by worker on fail path in M4+ via re-queue optional)
-	s.executeOnce(ctx, id, v, argv, argvRedacted, runStdin)
+	// SyncExec: first attempt inline; failures schedule retries for the
+	// worker (spec §9) instead of dying terminally.
+	maxRetries := s.Catalog.Daemon.MaxRetries
+	if v.Retries != nil {
+		maxRetries = *v.Retries
+	}
+	s.executeOnce(ctx, id, v, br, maxRetries, argv, argvRedacted, runStdin)
 }
 
-func (s *Server) executeOnce(ctx context.Context, id string, v verbs.Verb, argv, argvRedacted []string, stdin string) {
-	_ = s.Tasks.Update(id, func(t *queue.Task) {
+func (s *Server) executeOnce(ctx context.Context, id string, v verbs.Verb, br *circuit.Breaker, maxRetries int, argv, argvRedacted []string, stdin string) {
+	_ = s.Tasks.UpdateAndAudit(id, func(t *queue.Task) {
 		t.State = queue.StateExecuting
 		t.Attempt = 0
-	})
-	_ = s.audit(audit.Event{
+	}, audit.Event{
 		TaskID: id, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
 		State: queue.StateExecuting, ArgvRedacted: argvRedacted, Attempt: 0,
 	})
@@ -341,45 +429,114 @@ func (s *Server) executeOnce(ctx context.Context, id string, v verbs.Verb, argv,
 		timeout = time.Duration(v.TimeoutS) * time.Second
 	}
 	res := execx.Run(ctx, argv, stdin, timeout)
-	lat := time.Since(start).Milliseconds()
+	end := time.Now()
+	lat := end.Sub(start).Milliseconds()
+	stdout := scrubOutput(res.Stdout, stdin)
+	stderr := scrubOutput(res.Stderr, stdin)
 
-	_ = s.Tasks.Update(id, func(t *queue.Task) {
-		ec := res.ExitCode
-		t.ExitCode = &ec
-		t.Stdout = res.Stdout
-		t.Stderr = res.Stderr
-		if res.TimedOut {
-			t.State = queue.StateTimeout
-			t.LastAttemptOutcome = "timeout"
-			t.Error = res.Err.Error()
-			return
+	outcome := "ok"
+	errMsg := ""
+	ec := res.ExitCode
+	if res.TimedOut {
+		outcome = "timeout"
+		if res.Err != nil {
+			errMsg = res.Err.Error()
+		} else {
+			errMsg = "timeout"
 		}
-		if res.Err != nil || res.ExitCode != 0 {
-			t.State = queue.StateFailed
-			t.LastAttemptOutcome = "failed"
-			if res.Err != nil {
-				t.Error = res.Err.Error()
-			} else {
-				t.Error = fmt.Sprintf("exit %d", res.ExitCode)
-			}
-			return
+	} else if res.Err != nil || res.ExitCode != 0 {
+		outcome = "failed"
+		if res.Err != nil {
+			errMsg = res.Err.Error()
+		} else {
+			errMsg = fmt.Sprintf("exit %d", res.ExitCode)
 		}
+	}
+	_ = s.Tasks.RecordAttempt(id, 0, start, end, &ec, outcome, errMsg)
+
+	if outcome == "ok" {
+		if br != nil {
+			br.Success()
+		}
+		var result any
 		if v.Parser == verbs.ParserJSON || v.Parser == "" {
 			if parsed, err := execx.ParseJSON(res.Stdout); err == nil {
-				t.Result = parsed
-				b, _ := json.Marshal(parsed)
-				t.ResultJSON = string(b)
+				result = parsed
 			}
 		}
-		t.State = queue.StateExecuted
-		t.LastAttemptOutcome = "ok"
-	})
-	task, _ := s.Tasks.Get(id)
-	_ = s.audit(audit.Event{
+		_ = s.Tasks.UpdateAndAudit(id, func(t *queue.Task) {
+			t.State = queue.StateExecuted
+			t.LastAttemptOutcome = "ok"
+			t.ExitCode = &ec
+			t.Stdout = stdout
+			t.Stderr = stderr
+			t.Result = result
+			t.Error = ""
+			t.NextRunAt = nil
+		}, audit.Event{
+			TaskID: id, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
+			State: queue.StateExecuted, ArgvRedacted: argvRedacted, ExitCode: &ec,
+			LatencyMS: lat, Attempt: 0,
+		})
+		return
+	}
+
+	// failed / timeout: record the verdict, then retry or exhaust (spec §9).
+	if br != nil {
+		br.Failure()
+	}
+	if retry.ShouldExhaust(0, maxRetries) {
+		_ = s.Tasks.UpdateAndAudit(id, func(t *queue.Task) {
+			t.State = queue.StateExhausted
+			t.LastAttemptOutcome = outcome
+			t.ExitCode = &ec
+			t.Stdout = stdout
+			t.Stderr = stderr
+			t.Error = errMsg
+			t.NextRunAt = nil
+		}, audit.Event{
+			TaskID: id, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
+			State: queue.StateExhausted, ArgvRedacted: argvRedacted, ExitCode: &ec,
+			LatencyMS: lat, Attempt: 0, Error: errMsg,
+		})
+		if s.Notifier == nil {
+			s.Notifier = notify.Termux{}
+		}
+		_ = s.Notifier.Exhausted(ctx, v.Name, id, 1)
+		return
+	}
+	delay := retry.DelayAfterFailure(s.backoffBase(), 0, maxServerJitter)
+	next := time.Now().UTC().Add(delay)
+	_ = s.Tasks.UpdateAndAudit(id, func(t *queue.Task) {
+		t.State = queue.StateRetryScheduled
+		t.LastAttemptOutcome = outcome
+		t.ExitCode = &ec
+		t.Stdout = stdout
+		t.Stderr = stderr
+		t.Error = errMsg
+		t.Attempt = 1
+		t.NextRunAt = &next
+	}, audit.Event{
 		TaskID: id, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
-		State: task.State, ArgvRedacted: argvRedacted, ExitCode: task.ExitCode,
-		LatencyMS: lat, Attempt: 0, Error: task.Error,
+		State: "will-retry", ArgvRedacted: argvRedacted, ExitCode: &ec,
+		LatencyMS: lat, Attempt: 0, Error: errMsg,
 	})
+}
+
+// maxServerJitter mirrors the worker default (spec: jitter <= 250ms).
+const maxServerJitter = 250 * time.Millisecond
+
+func (s *Server) backoffBase() time.Duration {
+	return time.Duration(s.Catalog.Daemon.BackoffBaseS * float64(time.Second))
+}
+
+// scrubOutput withholds child output that echoes a stdin secret: stdin
+// bodies are never persisted or served, even second-hand via stdout.
+func scrubOutput(out, stdinSecret string) string {
+	if stdinSecret != "" && strings.Contains(out, stdinSecret) {
+		return approve.RedactedMarker
+	}
+	return out
 }
 
 func (s *Server) audit(ev audit.Event) error {
@@ -420,7 +577,8 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 		Verb string         `json:"verb"`
 		Args map[string]any `json:"args"`
 	}
-	dec := json.NewDecoder(r.Body)
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.DisallowUnknownFields()
 	if err := dec.Decode(&body); err != nil && err != io.EOF {
 		writeErr(w, http.StatusBadRequest, "invalid_json", err.Error(), "")
 		return
@@ -449,15 +607,58 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "validation_error", err.Error(), "")
 		return
 	}
+	// P0: streams are Tier B watch verbs — they pass the same approval
+	// gate as one-shot verbs, not around it.
+	approval := approve.Resolve(v, s.Catalog.Daemon, s.Policy)
+	approvedBy := approval.By
+	if approval.NeedsPrompt {
+		prompter := s.Prompter
+		if prompter == nil {
+			prompter = approve.DialogPrompter{}
+		}
+		res := prompter.Confirm(r.Context(), approve.DialogTitle(v.Name),
+			approve.DialogBody(v, argvRedacted), approve.DefaultPromptTimeout)
+		if res.TimedOut || res.Err != nil || !res.Approved {
+			errMsg := "denied"
+			if res.TimedOut {
+				errMsg = "approval timeout"
+			} else if res.Err != nil {
+				errMsg = res.Err.Error()
+			}
+			_ = s.audit(audit.Event{
+				TaskID: "", Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
+				State: queue.StateDenied, ArgvRedacted: argvRedacted,
+				Approval: string(approval.Mode), Error: errMsg,
+			})
+			writeErr(w, http.StatusForbidden, "approval_denied", errMsg, "")
+			return
+		}
+		approvedBy = "user"
+	}
+	br := s.breakerFor(v)
+	if br != nil {
+		if sn := br.Snapshot(); sn.State == circuit.Open {
+			writeErr(w, http.StatusServiceUnavailable, "circuit_open", fmt.Sprintf("circuit open for %s", v.Name), "")
+			return
+		}
+	}
 	st, err := s.Streams.Start(v, argv)
 	if err != nil {
+		if br != nil {
+			br.Failure()
+		}
 		writeErr(w, http.StatusInternalServerError, "stream_start_failed", err.Error(), "")
 		return
+	}
+	if br != nil {
+		br.Success()
 	}
 	_ = s.audit(audit.Event{
 		TaskID: st.ID, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
 		State: "stream_open", ArgvRedacted: argvRedacted,
+		Approval: string(approval.Mode), ApprovedBy: approvedBy,
 	})
+	_, _ = s.Tasks.DrainOutbox(s.Audit, 20)
 	writeJSON(w, http.StatusAccepted, map[string]any{"stream_id": st.ID, "verb": st.Verb})
 }
 
@@ -474,7 +675,10 @@ func (s *Server) handleGetStream(w http.ResponseWriter, r *http.Request) {
 	}
 	var since uint64
 	if q := r.URL.Query().Get("since"); q != "" {
-		_, _ = fmt.Sscanf(q, "%d", &since)
+		if _, err := fmt.Sscanf(q, "%d", &since); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid_since", fmt.Sprintf("bad ?since=%q", q), id)
+			return
+		}
 	}
 	events := st.Ring.Since(since)
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -517,25 +721,30 @@ func expandArgv(v verbs.Verb, args map[string]any, stdin string) (argv, redacted
 	argv = make([]string, len(v.Argv))
 	redacted = make([]string, len(v.Argv))
 	for i, tok := range v.Argv {
-		out, isTmpl, name := subst(tok, args)
+		out, isTmpl, fields := subst(tok, args)
 		argv[i] = out
 		redacted[i] = out
 		if isTmpl {
-			if _, sec := secrets[name]; sec {
-				redacted[i] = approve.RedactedMarker
+			// Every placeholder in the token must be checked, not just
+			// the last: "{{.a}}-{{.b}}" with either secret redacts.
+			for _, name := range fields {
+				if _, sec := secrets[name]; sec {
+					redacted[i] = approve.RedactedMarker
+					break
+				}
 			}
 		}
-		if stdin != "" && argv[i] == stdin {
+		if stdin != "" && strings.Contains(argv[i], stdin) {
 			redacted[i] = approve.RedactedMarker
 		}
 	}
 	return argv, redacted, nil
 }
 
-func subst(tok string, args map[string]any) (out string, isTemplate bool, field string) {
+func subst(tok string, args map[string]any) (out string, isTemplate bool, fields []string) {
 	const start, end = "{{.", "}}"
 	if !strings.Contains(tok, start) {
-		return tok, false, ""
+		return tok, false, nil
 	}
 	isTemplate = true
 	out = tok
@@ -550,14 +759,14 @@ func subst(tok string, args map[string]any) (out string, isTemplate bool, field 
 		}
 		j += i
 		name := out[i+len(start) : j]
-		field = name
+		fields = append(fields, name)
 		val, ok := args[name]
 		if !ok {
 			val = ""
 		}
 		out = out[:i] + fmt.Sprint(val) + out[j+len(end):]
 	}
-	return out, isTemplate, field
+	return out, isTemplate, fields
 }
 
 type errBody struct {

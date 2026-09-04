@@ -51,6 +51,17 @@ type Task struct {
 	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
+// IdempotencyRecord binds a client key to the task created for it (ADR-0003).
+// RequestHash covers verb + canonical args + stdin so different payloads
+// under the same key are conflicts, not replays.
+type IdempotencyRecord struct {
+	Key         string
+	Verb        string
+	RequestHash string
+	TaskID      string
+	CreatedAt   time.Time
+}
+
 // CreateInput is the payload for inserting a new task.
 type CreateInput struct {
 	Verb         string
@@ -74,6 +85,14 @@ type Store interface {
 	RecordAttempt(taskID string, n int, started, ended time.Time, exitCode *int, outcome, errMsg string) error
 	// AppendAudit enqueues an audit event (outbox on SQLite; immediate on Memory+Logger).
 	AppendAudit(ev audit.Event) error
+	// CreateAndAudit inserts a task and its audit event atomically (ADR-0002).
+	CreateAndAudit(in CreateInput, ev audit.Event) (*Task, error)
+	// UpdateAndAudit applies fn and appends the audit event atomically (ADR-0002).
+	UpdateAndAudit(id string, fn func(*Task), ev audit.Event) error
+	// FindIdempotency looks up a client idempotency key (ADR-0003).
+	FindIdempotency(key string) (IdempotencyRecord, bool, error)
+	// SaveIdempotency records a key binding with plain INSERT (duplicate = error).
+	SaveIdempotency(rec IdempotencyRecord) error
 	// DrainOutbox writes pending outbox rows to the audit file logger.
 	DrainOutbox(log *audit.Logger, limit int) (int, error)
 	Close() error

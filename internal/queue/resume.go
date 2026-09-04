@@ -3,6 +3,8 @@ package queue
 import (
 	"fmt"
 	"time"
+
+	"github.com/DSamuelHodge/dispatcher-go/internal/audit"
 )
 
 // ResumeStats summarizes boot crash-resume work.
@@ -43,21 +45,34 @@ func Resume(store Store, now time.Time) (ResumeStats, error) {
 			st.RetryFuture++
 		}
 	}
-	// accepted left over mid-request should become pending if approved already;
-	// keep accepted as-is (will be rare); treat accepted as reclaimable pending for safety
+	// accepted means created but never through the approval gate (the gate
+	// runs inline right after Create). Fail closed: cancel rather than
+	// making a never-approved task runnable. Audited like every terminal
+	// transition (ADR-0002).
 	for _, t := range store.List(StateAccepted) {
-		_ = store.Update(t.ID, func(tk *Task) {
-			tk.State = StatePending
-			tk.Error = "resumed after crash (was accepted)"
+		err := store.UpdateAndAudit(t.ID, func(tk *Task) {
+			tk.State = StateCanceled
+			tk.Error = "canceled on restart: never passed approval gate"
+		}, audit.Event{
+			TaskID: t.ID, Verb: t.Verb, State: StateCanceled,
+			ArgvRedacted: t.ArgvRedacted, Error: "canceled on restart: never passed approval gate",
 		})
-		st.ExecutingToPending++ // count as recovered
+		if err != nil {
+			return st, err
+		}
 	}
 	// pending_approval at crash → denied (cannot complete dialog safely) — safer than hanging
 	for _, t := range store.List(StatePendingApproval) {
-		_ = store.Update(t.ID, func(tk *Task) {
+		err := store.UpdateAndAudit(t.ID, func(tk *Task) {
 			tk.State = StateDenied
 			tk.Error = "approval interrupted by crash"
+		}, audit.Event{
+			TaskID: t.ID, Verb: t.Verb, State: StateDenied,
+			ArgvRedacted: t.ArgvRedacted, Error: "approval interrupted by crash",
 		})
+		if err != nil {
+			return st, err
+		}
 	}
 	return st, nil
 }
