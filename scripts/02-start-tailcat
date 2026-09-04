@@ -8,7 +8,7 @@ SERVE="${DISPATCHER_HOME}/scripts/tailcat-serve.sh"
 LOGDIR="${DISPATCHER_HOME}/logs"
 mkdir -p "$LOGDIR"
 if [ ! -x "$SERVE" ]; then
-  echo "02-start-tailcat: $SERVE missing (re-run setup.sh)" >>"$LOGDIR/tailcat.stdout"
+  echo "02-start-tailcat: $SERVE missing (re-run setup.sh from the repo root)" >>"$LOGDIR/tailcat.stdout"
   exit 1
 fi
 if pgrep -f 'tailcat serve' >/dev/null 2>&1; then

@@ -186,8 +186,7 @@ func (s *Server) approvalSummary() map[string]any {
 		"prompt_timeout_s": 120,
 		// unattended (-unattended flag) lets global always-approve cover
 		// force_ask verbs: remote-agent full autonomy, no human gate.
-		"unattended":           s.Unattended,
-		"unattended_high_risk": s.Unattended,
+		"unattended": s.Unattended,
 	}
 	if s.PolicyPath != "" {
 		out["policy_path"] = s.PolicyPath
@@ -273,16 +272,16 @@ func (s *Server) handlePostVerb(w http.ResponseWriter, r *http.Request) {
 	// ADR-0003: idempotency key binds (verb, args, stdin) to one task.
 	reqHash := idempotencyHash(v.Name, body.Args, body.Stdin)
 	if body.IdempotencyKey != "" {
-		if Stockholder, found, err := s.Tasks.FindIdempotency(body.IdempotencyKey); err != nil {
+		if prior, found, err := s.Tasks.FindIdempotency(body.IdempotencyKey); err != nil {
 			writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), "")
 			return
 		} else if found {
-			if Stockholder.Verb != v.Name || Stockholder.RequestHash != reqHash {
+			if prior.Verb != v.Name || prior.RequestHash != reqHash {
 				writeErr(w, http.StatusConflict, "idempotency_conflict",
-					fmt.Sprintf("idempotency key already used for a different request (task %s)", Stockholder.TaskID), "")
+					fmt.Sprintf("idempotency key already used for a different request (task %s)", prior.TaskID), "")
 				return
 			}
-			if t, ok := s.Tasks.Get(Stockholder.TaskID); ok {
+			if t, ok := s.Tasks.Get(prior.TaskID); ok {
 				writeJSON(w, http.StatusOK, map[string]any{
 					"task_id": t.ID,
 					"status":  t.State,

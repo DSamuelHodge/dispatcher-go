@@ -173,7 +173,7 @@ phone runs global `always-approve` (`{"approval_mode":
 for high-risk verbs; together, per-verb `ask` and `force_ask` gates are
 overridden to approve. Every bypassed approval audits
 `unattended:true`, and `/v1/health` reports
-`approval.unattended`/`unattended_high_risk` — check it remotely to
+`approval.unattended` — check it remotely to
 confirm the posture you think is running. Without `-unattended`, gated
 verbs time out to denied when no human is present.
 

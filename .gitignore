@@ -10,6 +10,7 @@
 
 # Daemon runtime state — NEVER commit
 .agent-token
+.tailcat-allow
 logs/
 data/
 *.db

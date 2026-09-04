@@ -24,7 +24,7 @@ PORT="${TAILCAT_SERVE_PORT:-8477}"
 KEY="${TAILCAT_KEY:-dispatcher}"
 LOGDIR="${INSTALL_DIR}/logs"
 
-[ -x "$TAILCAT" ] || { echo "tailcat-serve: $TAILCAT not executable (run setup.sh with INSTALL_TAILCAT=1)" >&2; exit 1; }
+[ -x "$TAILCAT" ] || { echo "tailcat-serve: $TAILCAT not executable (re-run setup.sh from the repo root with INSTALL_TAILCAT=1)" >&2; exit 1; }
 case "$ALLOW" in
   nodekey:*) ;;
   *) echo "tailcat-serve: refusing to serve without TAILCAT_ALLOW=nodekey:... (or $ALLOW_FILE)" >&2; exit 1 ;;
@@ -40,8 +40,8 @@ while true; do
   nohup "$TAILCAT" serve --key="$KEY" --allow="$ALLOW" "$PORT" \
     >>"$LOGDIR/tailcat.stdout" 2>>"$LOGDIR/tailcat.stderr" &
   pid=$!
-  wait $pid
-  code=$?
+  code=0
+  wait "$pid" || code=$?
   echo "tailcat-serve: exited $code, restarting in ${backoff}s" >>"$LOGDIR/tailcat.stdout"
   sleep $backoff
   backoff=$((backoff < 60 ? backoff * 2 : 60))

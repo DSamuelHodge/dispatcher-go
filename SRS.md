@@ -107,7 +107,7 @@ Task states (normative): spec §9.1 — `accepted`, `pending_approval`, `approve
 - FR-4.5 Unattended (remote-agent full autonomy): `-unattended` (or `DISPATCHER_UNATTENDED=1`)
   makes an explicit global `always-approve` absolute, overriding per-verb `ask` and `force_ask`
   gates. Without global `always-approve` it changes nothing. Every bypassed approval audits
-  `unattended:true`; `/v1/health` reports `approval.unattended` / `unattended_high_risk`.
+  `unattended:true`; `/v1/health` reports `approval.unattended`.
 - FR-4.4 `stdin:true`: body → child stdin pipe; `[REDACTED]` in dialog, task GET, audit, SQLite.
 
 ### FR-5 Audit

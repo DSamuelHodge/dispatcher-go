@@ -730,7 +730,7 @@ func TestHealthReportsUnattended(t *testing.T) {
 	if err := json.Unmarshal(raw, &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.Approval["unattended"] != true || out.Approval["unattended_high_risk"] != true {
-		t.Fatalf("health missing unattended flags: %s", raw)
+	if out.Approval["unattended"] != true {
+		t.Fatalf("health missing unattended flag: %s", raw)
 	}
 }
