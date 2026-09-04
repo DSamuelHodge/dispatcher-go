@@ -24,25 +24,6 @@ const (
 	TierB Tier = "B" // act | watch
 )
 
-// Risk is the declared risk level.
-type Risk string
-
-const (
-	RiskNone   Risk = "none"
-	RiskLow    Risk = "low"
-	RiskMedium Risk = "medium"
-	RiskHigh   Risk = "high"
-)
-
-// Approval is the per-verb approval override.
-type Approval string
-
-const (
-	ApprovalInherit       Approval = "inherit"
-	ApprovalAsk           Approval = "ask"
-	ApprovalAlwaysApprove Approval = "always-approve"
-)
-
 // Parser selects stdout handling.
 type Parser string
 
@@ -74,19 +55,16 @@ type Watch struct {
 // Verb is one catalog entry.
 type Verb struct {
 	Name                     string    `yaml:"name"`
-	Tier                     Tier      `yaml:"tier"`
-	Risk                     Risk      `yaml:"risk"`
-	Approval                 Approval  `yaml:"approval"`
-	ForceAskEvenIfGlobalAuto bool      `yaml:"force_ask_even_if_global_auto"`
-	Argv                     []string  `yaml:"argv"`
-	Args                     []ArgSpec `yaml:"args"`
-	StdinArg                 *StdinArg `yaml:"stdin_arg"`
-	TimeoutS                 int       `yaml:"timeout_s"`
-	Retries                  *int      `yaml:"retries"`
-	RetryBackoff             string    `yaml:"retry_backoff"`
-	CircuitBreakerThreshold  *int      `yaml:"circuit_breaker_threshold"`
-	Parser                   Parser    `yaml:"parser"`
-	Watch                    any       `yaml:"watch"` // false | Watch
+	Tier                    Tier      `yaml:"tier"`
+	Argv                    []string  `yaml:"argv"`
+	Args                    []ArgSpec `yaml:"args"`
+	StdinArg                *StdinArg `yaml:"stdin_arg"`
+	TimeoutS                int       `yaml:"timeout_s"`
+	Retries                 *int      `yaml:"retries"`
+	RetryBackoff            string    `yaml:"retry_backoff"`
+	CircuitBreakerThreshold *int      `yaml:"circuit_breaker_threshold"`
+	Parser                  Parser    `yaml:"parser"`
+	Watch                   any       `yaml:"watch"` // false | Watch
 }
 
 // File is the top-level verbs.yaml document.
@@ -181,12 +159,6 @@ func applyDaemonDefaults(d config.Daemon, maxRetriesSet bool) config.Daemon {
 	if d.Listen == "" {
 		d.Listen = def.Listen
 	}
-	if d.ApprovalMode == "" {
-		d.ApprovalMode = def.ApprovalMode
-	}
-	if d.ApprovalBackend == "" {
-		d.ApprovalBackend = def.ApprovalBackend
-	}
 	if d.TaskTimeoutS == 0 {
 		d.TaskTimeoutS = def.TaskTimeoutS
 	}
@@ -255,19 +227,6 @@ func validateVerb(v Verb, d config.Daemon) error {
 	default:
 		return fmt.Errorf("tier must be A|B, got %q", v.Tier)
 	}
-	switch v.Risk {
-	case RiskNone, RiskLow, RiskMedium, RiskHigh:
-	default:
-		return fmt.Errorf("risk must be none|low|medium|high, got %q", v.Risk)
-	}
-	switch v.Approval {
-	case ApprovalInherit, ApprovalAsk, ApprovalAlwaysApprove, "":
-	default:
-		return fmt.Errorf("approval must be inherit|ask|always-approve, got %q", v.Approval)
-	}
-	if v.Approval == "" {
-		v.Approval = ApprovalInherit
-	}
 	if len(v.Argv) == 0 {
 		return fmt.Errorf("argv is required")
 	}
@@ -293,9 +252,6 @@ func validateVerb(v Verb, d config.Daemon) error {
 			if argv0 == "termux-nfc" && flag == "-w" {
 				return fmt.Errorf("tier A must not use mutating argv flag -w on termux-nfc")
 			}
-		}
-		if v.Risk == RiskHigh {
-			return fmt.Errorf("tier A must not declare risk high")
 		}
 	}
 	if v.TimeoutS < 0 {

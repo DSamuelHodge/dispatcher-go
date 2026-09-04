@@ -1,22 +1,20 @@
 # Give your AI agent eyes, hands, ears, not keys.
 
-Your phone can text, sense, locate, and notify. An AI "brain" wants to
-use those abilities, but raw shell access is all-or-nothing: one bad
-command and it reads your SMS or wipes storage with no record and no
-chance to stop it.
+Your phone can text, sense, locate, and notify. An AI agent wants those
+abilities without raw shell access.
 
-dispatcher-go is the single gatekeeper between the brain and your phone.
-The brain gets 76 safe, named verbs (`battery.status`, `sms.send`,
-`location.once`...). Dangerous ones pause for an on-device yes/no tap.
-Everything is written to an audit log. The model never holds SMS,
-camera, or keystore permission — the gatekeeper does.
+dispatcher-go is the single loopback gatekeeper between the agent and
+Termux:API. The agent gets named verbs (`battery.status`, `sms.send`,
+`location.once`...) and executes them with full autonomy once it holds
+the token. Everything is written to an audit log. The model never holds
+SMS, camera, or keystore permission — the gatekeeper does.
 
 - **One thing touches Termux:API.** A loopback daemon (`127.0.0.1:8477`)
   is the only process allowed near it.
 - **Typed verbs, not argv.** No shell, no raw `termux-*` strings from the
   model; new capabilities are YAML-only additions.
-- **Humans approve danger.** High-risk verbs block on a `termux-dialog`
-  confirm; a policy file covers away/DND stretches.
+- **Full agent autonomy.** Token-authenticated agents execute any catalog
+  verb without on-device confirm gates. Trust is the token + loopback bind.
 - **Every attempt is on record.** NDJSON audit log plus a crash-safe
   SQLite outbox, with retry, circuit-breaking, and resume after reboot.
 
@@ -38,6 +36,13 @@ Every route needs an `X-Agent-Token` header. The token is generated into
 `~/dispatcher-go/.agent-token` (0600) on first start. Loopback isn't
 private on Android, so the token is the real access control — share it
 with the brain, rotate by deleting the file and restarting.
+
+## Verb discovery
+
+Do not load every verb schema into the agent context. Prefer
+`GET /v1/verbs/search?q=…`, then `GET /v1/verbs/{name}`, then `POST`.
+Default `GET /v1/verbs` is a short summary list; task GETs are compact.
+Agent playbook: [`skills/dispatcher-go/SKILL.md`](skills/dispatcher-go/SKILL.md).
 
 ## Go deeper
 

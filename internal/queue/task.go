@@ -40,8 +40,6 @@ type Task struct {
 	MaxRetries         int        `json:"max_retries,omitempty"`
 	NextRunAt          *time.Time `json:"next_run_at,omitempty"`
 	LastAttemptOutcome string     `json:"last_attempt_outcome,omitempty"`
-	ApprovalMode       string     `json:"approval_mode,omitempty"`
-	ApprovedBy         string     `json:"approved_by,omitempty"`
 	ExitCode           *int       `json:"exit_code,omitempty"`
 	Stdout             string     `json:"stdout,omitempty"`
 	Stderr             string     `json:"stderr,omitempty"`

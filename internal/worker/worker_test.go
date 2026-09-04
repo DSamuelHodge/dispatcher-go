@@ -30,8 +30,6 @@ func TestWorkerExhaustion(t *testing.T) {
 version: 1
 daemon:
   listen: "127.0.0.1:8477"
-  approval_mode: always-approve
-  approval_backend: dialog
   task_timeout_s: 2
   max_retries: 2
   backoff_base_s: 0.01
@@ -42,8 +40,6 @@ daemon:
 verbs:
   - name: always.fail
     tier: B
-    risk: low
-    approval: always-approve
     argv: ["termux-toast", "x"]
     parser: exit
     watch: false
@@ -113,8 +109,6 @@ func TestWorkerSuccess(t *testing.T) {
 version: 1
 daemon:
   listen: "127.0.0.1:8477"
-  approval_mode: ask
-  approval_backend: dialog
   task_timeout_s: 5
   max_retries: 5
   backoff_base_s: 1
@@ -125,8 +119,6 @@ daemon:
 verbs:
   - name: battery.status
     tier: A
-    risk: none
-    approval: inherit
     argv: ["termux-battery-status"]
     parser: json
     watch: false

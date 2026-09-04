@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/DSamuelHodge/dispatcher-go/internal/api"
-	"github.com/DSamuelHodge/dispatcher-go/internal/approve"
 	"github.com/DSamuelHodge/dispatcher-go/internal/audit"
 	"github.com/DSamuelHodge/dispatcher-go/internal/auth"
 	"github.com/DSamuelHodge/dispatcher-go/internal/circuit"
@@ -29,8 +28,6 @@ const catalogYAML = `
 version: 1
 daemon:
   listen: "127.0.0.1:0"
-  approval_mode: ask
-  approval_backend: dialog
   task_timeout_s: 30
   max_retries: 5
   backoff_base_s: 1
@@ -41,16 +38,11 @@ daemon:
 verbs:
   - name: battery.status
     tier: A
-    risk: none
-    approval: inherit
     argv: ["termux-battery-status"]
     parser: json
     watch: false
   - name: sms.send
     tier: B
-    risk: high
-    approval: ask
-    force_ask_even_if_global_auto: true
     argv: ["termux-sms-send", "-n", "{{.number}}"]
     args:
       - {name: number, flag: -n, type: string, required: true}
@@ -60,15 +52,13 @@ verbs:
     watch: false
   - name: clipboard.set
     tier: B
-    risk: medium
-    approval: inherit
     argv: ["termux-clipboard-set"]
     stdin_arg: {arg: text}
     parser: exit
     watch: false
 `
 
-func setup(t *testing.T, prompter approve.Prompter) (*api.Server, string, *audit.Logger, func()) {
+func setup(t *testing.T) (*api.Server, string, *audit.Logger, func()) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("sh shim")
@@ -96,11 +86,6 @@ func setup(t *testing.T, prompter approve.Prompter) (*api.Server, string, *audit
 	s := api.New(cat, tok, store)
 	s.SyncExec = true
 	s.Audit = log
-	if prompter != nil {
-		s.Prompter = prompter
-	} else {
-		s.Prompter = approve.StaticPrompter{Approve: true}
-	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -127,7 +112,7 @@ func writeShim(t *testing.T, dir, name, body string) {
 }
 
 func TestUnauthorized(t *testing.T) {
-	_, base, _, cleanup := setup(t, nil)
+	_, base, _, cleanup := setup(t)
 	defer cleanup()
 	res, err := http.Get(base + "/v1/health")
 	if err != nil {
@@ -140,7 +125,7 @@ func TestUnauthorized(t *testing.T) {
 }
 
 func TestBatteryRoundTrip(t *testing.T) {
-	s, base, _, cleanup := setup(t, nil)
+	s, base, _, cleanup := setup(t)
 	defer cleanup()
 	tok := s.Token.String()
 
@@ -168,8 +153,8 @@ func TestBatteryRoundTrip(t *testing.T) {
 	}
 }
 
-func TestSMSSendDeniedNoRetry(t *testing.T) {
-	s, base, log, cleanup := setup(t, approve.StaticPrompter{Approve: false})
+func TestSMSSendExecutesWithRedaction(t *testing.T) {
+	s, base, log, cleanup := setup(t)
 	defer cleanup()
 	secret := "super-secret-message-xyz"
 	payload := map[string]any{
@@ -194,10 +179,9 @@ func TestSMSSendDeniedNoRetry(t *testing.T) {
 		Status string `json:"status"`
 	}
 	_ = json.Unmarshal(raw, &out)
-	if out.Status != queue.StateDenied {
-		t.Fatalf("want denied got %s (%s)", out.Status, raw)
+	if out.Status != queue.StateExecuted {
+		t.Fatalf("want executed got %s (%s)", out.Status, raw)
 	}
-	// GET task must not contain secret
 	greq, _ := http.NewRequest(http.MethodGet, base+"/v1/tasks/"+out.TaskID, nil)
 	greq.Header.Set(auth.Header, s.Token.String())
 	gres, err := http.DefaultClient.Do(greq)
@@ -212,15 +196,10 @@ func TestSMSSendDeniedNoRetry(t *testing.T) {
 	if log.Contains(secret) {
 		t.Fatal("secret leaked in audit")
 	}
-	// denied never becomes retry_scheduled / pending again
-	task, _ := s.Tasks.Get(out.TaskID)
-	if task.State != queue.StateDenied {
-		t.Fatalf("state=%s", task.State)
-	}
 }
 
 func TestSMSSendApproved(t *testing.T) {
-	s, base, log, cleanup := setup(t, approve.StaticPrompter{Approve: true})
+	s, base, log, cleanup := setup(t)
 	defer cleanup()
 	secret := "another-secret-abc"
 	payload := map[string]any{
@@ -263,7 +242,7 @@ func TestSMSSendApproved(t *testing.T) {
 
 func TestClipboardRedaction(t *testing.T) {
 	// clipboard inherits ask + tier B → needs prompt; approve auto
-	s, base, log, cleanup := setup(t, approve.StaticPrompter{Approve: true})
+	s, base, log, cleanup := setup(t)
 	defer cleanup()
 	secret := "clipboard-secret-42"
 	b, _ := json.Marshal(map[string]any{"stdin": secret})
@@ -296,31 +275,8 @@ func TestClipboardRedaction(t *testing.T) {
 	}
 }
 
-func TestForceAskBeatsPolicyAlways(t *testing.T) {
-	s, base, _, cleanup := setup(t, approve.StaticPrompter{Approve: false})
-	defer cleanup()
-	s.Policy = approve.PolicyFile{ApprovalMode: "always-approve"}
-	b, _ := json.Marshal(map[string]any{"args": map[string]any{"number": "1"}, "stdin": "x"})
-	req, _ := http.NewRequest(http.MethodPost, base+"/v1/verbs/sms.send", bytes.NewReader(b))
-	req.Header.Set(auth.Header, s.Token.String())
-	req.Header.Set("Content-Type", "application/json")
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer res.Body.Close()
-	raw, _ := io.ReadAll(res.Body)
-	var out struct {
-		Status string `json:"status"`
-	}
-	_ = json.Unmarshal(raw, &out)
-	if out.Status != queue.StateDenied {
-		t.Fatalf("force_ask should still prompt/deny, got %s %s", out.Status, raw)
-	}
-}
-
 func TestUnknownVerb(t *testing.T) {
-	s, base, _, cleanup := setup(t, nil)
+	s, base, _, cleanup := setup(t)
 	defer cleanup()
 	req, _ := http.NewRequest(http.MethodPost, base+"/v1/verbs/no.such", bytes.NewReader([]byte(`{}`)))
 	req.Header.Set(auth.Header, s.Token.String())
@@ -335,7 +291,7 @@ func TestUnknownVerb(t *testing.T) {
 }
 
 func TestCircuitOpen503(t *testing.T) {
-	s, base, _, cleanup := setup(t, nil)
+	s, base, _, cleanup := setup(t)
 	defer cleanup()
 	s.Circuits = circuit.NewRegistry(1, time.Minute)
 	// trip battery breaker
@@ -362,7 +318,7 @@ func TestStreamLifecycle(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip()
 	}
-	s, base, _, cleanup := setup(t, nil)
+	s, base, _, cleanup := setup(t)
 	defer cleanup()
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, "termux-location"), []byte("#!/bin/sh\nwhile true; do echo loc-$(date +%s); sleep 0.05; done\n"), 0o755)
@@ -372,8 +328,6 @@ func TestStreamLifecycle(t *testing.T) {
 	cat2, err := verbs.Parse([]byte(catalogYAML + `
   - name: location.stream
     tier: B
-    risk: medium
-    approval: always-approve
     argv: ["termux-location", "-p", "gps", "-r", "updates"]
     parser: json
     watch: {mode: stream, buffer: 8}
@@ -385,10 +339,10 @@ func TestStreamLifecycle(t *testing.T) {
 	_ = cat2
 	// use existing setup catalog — add location.stream via direct map
 	s.Catalog.ByName["location.stream"] = verbs.Verb{
-		Name: "location.stream", Tier: verbs.TierB, Risk: verbs.RiskMedium,
-		Approval: verbs.ApprovalAlwaysApprove,
-		Argv:     []string{"termux-location", "-p", "gps", "-r", "updates"},
-		Watch:    map[string]any{"mode": "stream", "buffer": float64(8)},
+		Name:  "location.stream",
+		Tier:  verbs.TierB,
+		Argv:  []string{"termux-location", "-p", "gps", "-r", "updates"},
+		Watch: map[string]any{"mode": "stream", "buffer": float64(8)},
 	}
 	s.Catalog.Order = append(s.Catalog.Order, "location.stream")
 
@@ -474,7 +428,7 @@ func postVerbHelper(t *testing.T, base, tok, verb, payload string) (int, []byte)
 }
 
 func TestIdempotencyReplayAndConflict(t *testing.T) {
-	s, base, _, cleanup := setup(t, nil)
+	s, base, _, cleanup := setup(t)
 	defer cleanup()
 	tok := s.Token.String()
 
@@ -516,7 +470,7 @@ func TestIdempotencyReplayAndConflict(t *testing.T) {
 }
 
 func TestSyncExecFailureSchedulesRetry(t *testing.T) {
-	s, base, _, cleanup := setup(t, nil)
+	s, base, _, cleanup := setup(t)
 	defer cleanup()
 	// Shadow the succeeding shim with a failing one.
 	dir := t.TempDir()
@@ -547,15 +501,15 @@ func TestSyncExecFailureSchedulesRetry(t *testing.T) {
 	}
 }
 
-func injectLocationStream(t *testing.T, s *api.Server, dir string, approval verbs.Approval) {
+func injectLocationStream(t *testing.T, s *api.Server, dir string) {
 	t.Helper()
 	writeShim(t, dir, "termux-location", "#!/bin/sh\nwhile true; do echo loc; sleep 0.05; done\n")
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	s.Catalog.ByName["location.stream"] = verbs.Verb{
-		Name: "location.stream", Tier: verbs.TierB, Risk: verbs.RiskMedium,
-		Approval: approval,
-		Argv:     []string{"termux-location", "-p", "gps", "-r", "updates"},
-		Watch:    map[string]any{"mode": "stream", "buffer": float64(8)},
+		Name:  "location.stream",
+		Tier:  verbs.TierB,
+		Argv:  []string{"termux-location", "-p", "gps", "-r", "updates"},
+		Watch: map[string]any{"mode": "stream", "buffer": float64(8)},
 	}
 	s.Catalog.Order = append(s.Catalog.Order, "location.stream")
 }
@@ -575,32 +529,22 @@ func postStreamHelper(t *testing.T, base, tok string) (int, []byte) {
 	return res.StatusCode, body
 }
 
-func TestStreamRequiresApproval(t *testing.T) {
+func TestStreamStartsWithoutGate(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip()
 	}
-	// Denied prompter → 403, no stream started.
-	s, base, _, cleanup := setup(t, approve.StaticPrompter{Approve: false})
+	s, base, _, cleanup := setup(t)
 	defer cleanup()
 	s.Streams = streams.NewRegistry(8)
-	injectLocationStream(t, s, t.TempDir(), verbs.ApprovalAsk)
-	if st, body := postStreamHelper(t, base, s.Token.String()); st != http.StatusForbidden {
-		t.Fatalf("denied stream: status=%d %s, want 403", st, body)
-	}
-
-	// Approved prompter → 202.
-	s2, base2, _, cleanup2 := setup(t, approve.StaticPrompter{Approve: true})
-	defer cleanup2()
-	s2.Streams = streams.NewRegistry(8)
-	injectLocationStream(t, s2, t.TempDir(), verbs.ApprovalAsk)
-	st, body := postStreamHelper(t, base2, s2.Token.String())
+	injectLocationStream(t, s, t.TempDir())
+	st, body := postStreamHelper(t, base, s.Token.String())
 	if st != http.StatusAccepted {
-		t.Fatalf("approved stream: status=%d %s, want 202", st, body)
+		t.Fatalf("stream: status=%d %s, want 202", st, body)
 	}
 }
 
 func TestQueueFullConcurrent(t *testing.T) {
-	s, base, _, cleanup := setup(t, nil)
+	s, base, _, cleanup := setup(t)
 	defer cleanup()
 	// max_queue_depth is 100 in fixture; run 120 concurrent creates and
 	// assert store depth never exceeds it and losers get 503.
@@ -635,11 +579,9 @@ func TestQueueFullConcurrent(t *testing.T) {
 	}
 }
 
-func TestHealthApprovalObject(t *testing.T) {
-	s, base, _, cleanup := setup(t, nil)
+func TestHealthAutonomy(t *testing.T) {
+	s, base, _, cleanup := setup(t)
 	defer cleanup()
-	s.Policy = approve.PolicyFile{ApprovalMode: "always-approve"}
-	s.PolicyPath = "/tmp/policy.json"
 	req, _ := http.NewRequest(http.MethodGet, base+"/v1/health", nil)
 	req.Header.Set(auth.Header, s.Token.String())
 	res, err := http.DefaultClient.Do(req)
@@ -648,89 +590,147 @@ func TestHealthApprovalObject(t *testing.T) {
 	}
 	defer res.Body.Close()
 	var out struct {
-		Mode     string `json:"mode"`
-		Approval struct {
-			DaemonMode      string   `json:"daemon_mode"`
-			PolicyMode      string   `json:"policy_mode"`
-			EffectiveGlobal string   `json:"effective_global"`
-			Backend         string   `json:"backend"`
-			PolicyPath      string   `json:"policy_path"`
-			ForceAskVerbs   int      `json:"force_ask_verbs"`
-			ForceAskNames   []string `json:"force_ask_names"`
-			PerVerbAsk      int      `json:"per_verb_ask"`
-			PerVerbAlways   int      `json:"per_verb_always"`
-		} `json:"approval"`
+		Autonomy string `json:"autonomy"`
 	}
 	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	if out.Mode != "always-approve" || out.Approval.EffectiveGlobal != "always-approve" {
+	if out.Autonomy != "full" {
 		t.Fatalf("%+v", out)
 	}
-	if out.Approval.DaemonMode != "ask" || out.Approval.PolicyMode != "always-approve" {
-		t.Fatalf("%+v", out.Approval)
-	}
-	if out.Approval.PolicyPath != "/tmp/policy.json" {
-		t.Fatalf("%+v", out.Approval)
-	}
-	// sms.send in fixture is force_ask
-	if out.Approval.ForceAskVerbs < 1 || len(out.Approval.ForceAskNames) < 1 {
-		t.Fatalf("%+v", out.Approval)
-	}
 }
 
-func TestUnattendedBypassesForceAskEndToEnd(t *testing.T) {
-	// StaticPrompter refuses everything: without -unattended this would be
-	// denied; with it, sms.send (force_ask) auto-approves under global
-	// always-approve and the audit row carries unattended:true.
-	s, base, log, cleanup := setup(t, approve.StaticPrompter{Approve: false})
+func TestProgressiveVerbDiscovery(t *testing.T) {
+	s, base, _, cleanup := setup(t)
 	defer cleanup()
-	s.Unattended = true
-	s.Policy = approve.PolicyFile{ApprovalMode: "always-approve"}
-	b, _ := json.Marshal(map[string]any{
-		"args":  map[string]any{"number": "+15551234567"},
-		"stdin": "hello",
-	})
-	req, _ := http.NewRequest(http.MethodPost, base+"/v1/verbs/sms.send", bytes.NewReader(b))
-	req.Header.Set(auth.Header, s.Token.String())
-	req.Header.Set("Content-Type", "application/json")
+	tok := s.Token.String()
+
+	// default list is summary (no argv)
+	req, _ := http.NewRequest(http.MethodGet, base+"/v1/verbs", nil)
+	req.Header.Set(auth.Header, tok)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer res.Body.Close()
 	raw, _ := io.ReadAll(res.Body)
-	var out struct {
-		Status string `json:"status"`
+	var listed struct {
+		Detail string           `json:"detail"`
+		Count  int              `json:"count"`
+		Verbs  []map[string]any `json:"verbs"`
 	}
-	_ = json.Unmarshal(raw, &out)
-	if out.Status == "denied" {
-		t.Fatalf("unattended force_ask was denied: %s", raw)
+	if err := json.Unmarshal(raw, &listed); err != nil {
+		t.Fatal(err)
 	}
-	if !log.Contains(`"unattended":true`) {
-		t.Fatal("expected unattended:true in audit")
+	if listed.Detail != "summary" || listed.Count < 1 {
+		t.Fatalf("%s", raw)
+	}
+	if _, ok := listed.Verbs[0]["argv"]; ok {
+		t.Fatalf("default list leaked argv: %s", raw)
+	}
+
+	// names
+	req, _ = http.NewRequest(http.MethodGet, base+"/v1/verbs?detail=names", nil)
+	req.Header.Set(auth.Header, tok)
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = io.ReadAll(res.Body)
+	res.Body.Close()
+	var names struct {
+		Verbs []string `json:"verbs"`
+	}
+	_ = json.Unmarshal(raw, &names)
+	if len(names.Verbs) < 1 {
+		t.Fatalf("%s", raw)
+	}
+
+	// search
+	req, _ = http.NewRequest(http.MethodGet, base+"/v1/verbs/search?q=sms&limit=5", nil)
+	req.Header.Set(auth.Header, tok)
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = io.ReadAll(res.Body)
+	res.Body.Close()
+	var search struct {
+		Hits []struct {
+			Name string `json:"name"`
+		} `json:"hits"`
+	}
+	_ = json.Unmarshal(raw, &search)
+	if len(search.Hits) < 1 || search.Hits[0].Name != "sms.send" {
+		t.Fatalf("%s", raw)
+	}
+
+	// get one full schema
+	req, _ = http.NewRequest(http.MethodGet, base+"/v1/verbs/sms.send", nil)
+	req.Header.Set(auth.Header, tok)
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = io.ReadAll(res.Body)
+	res.Body.Close()
+	var one map[string]any
+	_ = json.Unmarshal(raw, &one)
+	if one["name"] != "sms.send" {
+		t.Fatalf("%s", raw)
+	}
+	if _, ok := one["args"]; !ok {
+		t.Fatalf("missing args: %s", raw)
+	}
+	if _, ok := one["stdin_arg"]; !ok {
+		t.Fatalf("missing stdin_arg: %s", raw)
 	}
 }
 
-func TestHealthReportsUnattended(t *testing.T) {
-	s, base, _, cleanup := setup(t, nil)
+func TestTaskProjectionCompactByDefault(t *testing.T) {
+	s, base, _, cleanup := setup(t)
 	defer cleanup()
-	s.Unattended = true
-	req, _ := http.NewRequest(http.MethodGet, base+"/v1/health", nil)
+	st, body := postVerbHelper(t, base, s.Token.String(), "battery.status", `{}`)
+	if st != http.StatusAccepted {
+		t.Fatalf("%d %s", st, body)
+	}
+	var out struct {
+		TaskID string `json:"task_id"`
+	}
+	_ = json.Unmarshal(body, &out)
+
+	req, _ := http.NewRequest(http.MethodGet, base+"/v1/tasks/"+out.TaskID, nil)
 	req.Header.Set(auth.Header, s.Token.String())
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Body.Close()
 	raw, _ := io.ReadAll(res.Body)
-	var out struct {
-		Approval map[string]any `json:"approval"`
+	res.Body.Close()
+	var compact map[string]any
+	_ = json.Unmarshal(raw, &compact)
+	if compact["state"] != queue.StateExecuted {
+		t.Fatalf("%s", raw)
 	}
-	if err := json.Unmarshal(raw, &out); err != nil {
+	if _, ok := compact["stdout"]; ok {
+		t.Fatalf("default task GET should omit stdout: %s", raw)
+	}
+	if _, ok := compact["result"]; !ok {
+		t.Fatalf("expected result in compact: %s", raw)
+	}
+
+	// full still available
+	req, _ = http.NewRequest(http.MethodGet, base+"/v1/tasks/"+out.TaskID+"?detail=full", nil)
+	req.Header.Set(auth.Header, s.Token.String())
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Approval["unattended"] != true {
-		t.Fatalf("health missing unattended flag: %s", raw)
+	raw, _ = io.ReadAll(res.Body)
+	res.Body.Close()
+	var full map[string]any
+	_ = json.Unmarshal(raw, &full)
+	if _, ok := full["argv_redacted"]; !ok {
+		t.Fatalf("full missing argv_redacted: %s", raw)
 	}
 }

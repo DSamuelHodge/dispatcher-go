@@ -3,8 +3,6 @@
 version: 1
 daemon:
   listen: "127.0.0.1:8477"
-  approval_mode: ask
-  approval_backend: dialog
   task_timeout_s: 30
   max_retries: 5          # total attempts = 1 + max_retries (attempts index 0..max_retries)
   backoff_base_s: 1       # delay after failure n = base * 2^n + jitter(<=250ms); n = attempt index of failed try
@@ -17,80 +15,60 @@ verbs:
   # --- Tier A perceive ---
   - name: battery.status
     tier: A
-    risk: none
-    approval: inherit
     argv: ["termux-battery-status"]
     parser: json
     watch: false
 
   - name: camera.info
     tier: A
-    risk: none
-    approval: inherit
     argv: ["termux-camera-info"]
     parser: json
     watch: false
 
   - name: audio.info
     tier: A
-    risk: none
-    approval: inherit
     argv: ["termux-audio-info"]
     parser: json
     watch: false
 
   - name: wifi.info
     tier: A
-    risk: low
-    approval: inherit
     argv: ["termux-wifi-connectioninfo"]
     parser: json
     watch: false
 
   - name: wifi.scan-one-shot
     tier: A
-    risk: low
-    approval: inherit
     argv: ["termux-wifi-scaninfo"]
     parser: json
     watch: false
 
   - name: telephony.cell
     tier: A
-    risk: medium
-    approval: inherit
     argv: ["termux-telephony-cellinfo"]
     parser: json
     watch: false
 
   - name: telephony.device
     tier: A
-    risk: low
-    approval: inherit
     argv: ["termux-telephony-deviceinfo"]
     parser: json
     watch: false
 
   - name: clipboard.get
     tier: A
-    risk: medium
-    approval: inherit
     argv: ["termux-clipboard-get"]
     parser: text
     watch: false
 
   - name: contacts.list
     tier: A
-    risk: medium
-    approval: inherit
     argv: ["termux-contact-list"]
     parser: json
     watch: false
 
   - name: call-log.read
     tier: A
-    risk: medium
-    approval: inherit
     argv: ["termux-call-log"]
     args:
       - {name: limit, flag: -l, type: int, required: false}
@@ -99,24 +77,18 @@ verbs:
 
   - name: sms.read
     tier: A
-    risk: medium
-    approval: inherit
     argv: ["termux-sms-list"]
     parser: json
     watch: false
 
   - name: sensor.list
     tier: A
-    risk: none
-    approval: inherit
     argv: ["termux-sensor", "-l"]
     parser: json
     watch: false
 
   - name: location.once
     tier: A
-    risk: medium
-    approval: inherit
     argv: ["termux-location", "-p", "{{.provider}}", "-r", "{{.request}}"]
     args:
       - {name: provider, flag: -p, type: string, required: false}
@@ -126,32 +98,24 @@ verbs:
 
   - name: volume.info
     tier: A
-    risk: none
-    approval: inherit
     argv: ["termux-volume"]
     parser: text
     watch: false
 
   - name: tts.engines
     tier: A
-    risk: none
-    approval: inherit
     argv: ["termux-tts-engines"]
     parser: json
     watch: false
 
   - name: notification.list
     tier: A
-    risk: medium
-    approval: inherit
     argv: ["termux-notification-list"]
     parser: json
     watch: false
 
   - name: infrared.frequencies
     tier: A
-    risk: none
-    approval: inherit
     argv: ["termux-infrared-frequencies"]
     parser: json
     watch: false
@@ -159,8 +123,6 @@ verbs:
   # --- Tier B act (seed; full set expands in M7) ---
   - name: clipboard.set
     tier: B
-    risk: medium
-    approval: inherit
     argv: ["termux-clipboard-set"]
     stdin_arg: {arg: text}
     parser: exit
@@ -168,9 +130,6 @@ verbs:
 
   - name: sms.send
     tier: B
-    risk: high
-    approval: ask
-    force_ask_even_if_global_auto: true
     argv: ["termux-sms-send", "-n", "{{.number}}"]
     args:
       - {name: number, flag: -n, type: string, required: true}
@@ -181,9 +140,6 @@ verbs:
 
   - name: telephony.call
     tier: B
-    risk: high
-    approval: ask
-    force_ask_even_if_global_auto: true
     argv: ["termux-telephony-call", "{{.number}}"]
     args:
       - {name: number, flag: "", type: string, required: true}
@@ -192,24 +148,18 @@ verbs:
 
   - name: toast.show
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-toast", "{{.text}}"]
     parser: exit
     watch: false
 
   - name: notification.send
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-notification", "-t", "{{.title}}", "-c", "{{.content}}"]
     parser: exit
     watch: false
 
   - name: vibrate
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-vibrate"]
     args:
       - {name: duration_ms, flag: -d, type: int, required: false}
@@ -219,8 +169,6 @@ verbs:
   # --- Tier B watch ---
   - name: location.stream
     tier: B
-    risk: medium
-    approval: inherit
     argv: ["termux-location", "-p", "{{.provider}}", "-r", "updates"]
     args:
       - {name: provider, flag: -p, type: string, required: false}
@@ -231,8 +179,6 @@ verbs:
 
   - name: sensor.stream
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-sensor", "-s", "{{.sensor}}"]
     args:
       - {name: sensor, flag: -s, type: string, required: false}
@@ -244,9 +190,6 @@ verbs:
   # microphone-record is a bounded one-shot capture (task), not a watch stream — ADR-0005
   - name: microphone.record
     tier: B
-    risk: high
-    approval: ask
-    force_ask_even_if_global_auto: true
     argv: ["termux-microphone-record", "-f", "{{.file}}"]
     args:
       - {name: file, flag: -f, type: string, required: true}
@@ -256,8 +199,6 @@ verbs:
 
   - name: camera.photo
     tier: B
-    risk: medium
-    approval: inherit
     argv: ["termux-camera-photo", "-c", "{{.camera}}", "{{.file}}"]
     args:
       - {name: camera, flag: -c, type: int, required: false}
@@ -267,8 +208,6 @@ verbs:
 
   - name: tts.speak
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-tts-speak", "{{.text}}"]
     args:
       - {name: text, flag: "", type: string, required: true}
@@ -277,8 +216,6 @@ verbs:
 
   - name: media.play
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-media-player", "play", "-f", "{{.file}}"]
     args:
       - {name: file, flag: -f, type: string, required: true}
@@ -287,8 +224,6 @@ verbs:
 
   - name: brightness.set
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-brightness", "{{.level}}"]
     args:
       - {name: level, flag: "", type: int, required: true}
@@ -297,8 +232,6 @@ verbs:
 
   - name: torch
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-torch", "{{.state}}"]
     args:
       - {name: state, flag: "", type: string, required: true}
@@ -307,8 +240,6 @@ verbs:
 
   - name: open.url
     tier: B
-    risk: medium
-    approval: inherit
     argv: ["termux-open", "{{.url}}"]
     args:
       - {name: url, flag: "", type: string, required: true}
@@ -317,8 +248,6 @@ verbs:
 
   - name: share
     tier: B
-    risk: medium
-    approval: inherit
     argv: ["termux-share", "{{.file}}"]
     args:
       - {name: file, flag: "", type: string, required: true}
@@ -327,8 +256,6 @@ verbs:
 
   - name: download.file
     tier: B
-    risk: medium
-    approval: inherit
     argv: ["termux-download", "{{.url}}"]
     args:
       - {name: url, flag: "", type: string, required: true}
@@ -337,8 +264,6 @@ verbs:
 
   - name: notification.remove
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-notification-remove", "{{.id}}"]
     args:
       - {name: id, flag: "", type: string, required: true}
@@ -347,8 +272,6 @@ verbs:
 
   - name: volume.set
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-volume", "{{.stream}}", "{{.level}}"]
     args:
       - {name: stream, flag: "", type: string, required: true}
@@ -358,8 +281,6 @@ verbs:
 
   - name: wallpaper.set
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-wallpaper", "-f", "{{.file}}"]
     args:
       - {name: file, flag: -f, type: string, required: true}
@@ -368,17 +289,12 @@ verbs:
 
   - name: fingerprint.auth
     tier: B
-    risk: high
-    approval: ask
-    force_ask_even_if_global_auto: true
     argv: ["termux-fingerprint"]
     parser: json
     watch: false
 
   - name: infrared.transmit
     tier: B
-    risk: medium
-    approval: inherit
     argv: ["termux-infrared-transmit", "-f", "{{.frequency}}"]
     args:
       - {name: frequency, flag: -f, type: string, required: true}
@@ -387,40 +303,30 @@ verbs:
 
   - name: saf.ls
     tier: A
-    risk: low
-    approval: inherit
     argv: ["termux-saf-ls"]
     parser: json
     watch: false
 
   - name: saf.stat
     tier: A
-    risk: low
-    approval: inherit
     argv: ["termux-saf-stat"]
     parser: json
     watch: false
 
   - name: saf.dirs
     tier: A
-    risk: low
-    approval: inherit
     argv: ["termux-saf-dirs"]
     parser: json
     watch: false
 
   - name: nfc.list
     tier: A
-    risk: low
-    approval: inherit
     argv: ["termux-nfc", "-r"]
     parser: json
     watch: false
 
   - name: usb.list
     tier: A
-    risk: low
-    approval: inherit
     argv: ["termux-usb", "-l"]
     parser: text
     watch: false
@@ -428,8 +334,6 @@ verbs:
   # --- M8 coverage: remaining termux-api surface ---
   - name: sensor.read
     tier: A
-    risk: low
-    approval: inherit
     argv: ["termux-sensor", "-s", "{{.sensor}}", "-n", "{{.count}}"]
     args:
       - {name: sensor, flag: -s, type: string, required: true}
@@ -440,8 +344,6 @@ verbs:
 
   - name: saf.read
     tier: A
-    risk: low
-    approval: inherit
     argv: ["termux-saf-read", "{{.uri}}"]
     args:
       - {name: uri, flag: "", type: string, required: true}
@@ -450,8 +352,6 @@ verbs:
 
   - name: wifi.enable
     tier: B
-    risk: medium
-    approval: inherit
     argv: ["termux-wifi-enable", "{{.enabled}}"]
     args:
       - {name: enabled, flag: "", type: string, required: true}
@@ -460,17 +360,12 @@ verbs:
 
   - name: keystore.list
     tier: B
-    risk: medium
-    approval: inherit
     argv: ["termux-keystore", "list"]
     parser: text
     watch: false
 
   - name: keystore.generate
     tier: B
-    risk: high
-    approval: ask
-    force_ask_even_if_global_auto: true
     argv: ["termux-keystore", "generate", "{{.alias}}", "{{.size}}"]
     args:
       - {name: alias, flag: "", type: string, required: true}
@@ -480,9 +375,6 @@ verbs:
 
   - name: keystore.delete
     tier: B
-    risk: high
-    approval: ask
-    force_ask_even_if_global_auto: true
     argv: ["termux-keystore", "delete", "{{.alias}}"]
     args:
       - {name: alias, flag: "", type: string, required: true}
@@ -491,9 +383,6 @@ verbs:
 
   - name: keystore.sign
     tier: B
-    risk: high
-    approval: ask
-    force_ask_even_if_global_auto: true
     argv: ["termux-keystore", "sign", "{{.alias}}"]
     stdin_arg: {arg: data}
     parser: text
@@ -501,8 +390,6 @@ verbs:
 
   - name: keystore.verify
     tier: B
-    risk: medium
-    approval: inherit
     argv: ["termux-keystore", "verify", "{{.alias}}"]
     stdin_arg: {arg: data}
     parser: text
@@ -510,8 +397,6 @@ verbs:
 
   - name: notification.channel
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-notification-channel", "{{.op}}", "{{.name}}"]
     args:
       - {name: op, flag: "", type: string, required: true}
@@ -521,24 +406,18 @@ verbs:
 
   - name: media.pause
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-media-player", "pause"]
     parser: exit
     watch: false
 
   - name: media.stop
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-media-player", "stop"]
     parser: exit
     watch: false
 
   - name: media.scan
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-media-scan", "{{.path}}"]
     args:
       - {name: path, flag: "", type: string, required: true}
@@ -547,8 +426,6 @@ verbs:
 
   - name: stt.listen
     tier: B
-    risk: medium
-    approval: inherit
     argv: ["termux-speech-to-text"]
     timeout_s: 120
     parser: json
@@ -556,8 +433,6 @@ verbs:
 
   - name: storage.get
     tier: B
-    risk: medium
-    approval: inherit
     argv: ["termux-storage-get", "-f", "{{.file}}"]
     args:
       - {name: file, flag: -f, type: string, required: false}
@@ -567,8 +442,6 @@ verbs:
 
   - name: saf.create
     tier: B
-    risk: medium
-    approval: inherit
     argv: ["termux-saf-create", "{{.name}}"]
     args:
       - {name: name, flag: "", type: string, required: true}
@@ -577,8 +450,6 @@ verbs:
 
   - name: saf.write
     tier: B
-    risk: medium
-    approval: inherit
     argv: ["termux-saf-write", "{{.uri}}"]
     stdin_arg: {arg: content}
     parser: exit
@@ -586,8 +457,6 @@ verbs:
 
   - name: saf.rm
     tier: B
-    risk: medium
-    approval: inherit
     argv: ["termux-saf-rm", "{{.uri}}"]
     args:
       - {name: uri, flag: "", type: string, required: true}
@@ -596,8 +465,6 @@ verbs:
 
   - name: saf.mkdir
     tier: B
-    risk: medium
-    approval: inherit
     argv: ["termux-saf-mkdir", "{{.name}}"]
     args:
       - {name: name, flag: "", type: string, required: true}
@@ -606,16 +473,12 @@ verbs:
 
   - name: saf.managedir
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-saf-managedir"]
     parser: text
     watch: false
 
   - name: job.schedule
     tier: B
-    risk: medium
-    approval: inherit
     argv: ["termux-job-scheduler", "-j", "{{.job_id}}", "--period-ms", "{{.period_ms}}", "-s"]
     args:
       - {name: job_id, flag: -j, type: string, required: true}
@@ -625,8 +488,6 @@ verbs:
 
   - name: job.cancel
     tier: B
-    risk: medium
-    approval: inherit
     argv: ["termux-job-scheduler", "--cancel", "-j", "{{.job_id}}"]
     args:
       - {name: job_id, flag: -j, type: string, required: true}
@@ -635,19 +496,14 @@ verbs:
 
   - name: nfc.write
     tier: B
-    risk: high
-    approval: ask
-    force_ask_even_if_global_auto: true
     argv: ["termux-nfc", "-w"]
     stdin_arg: {arg: payload}
     parser: json
     watch: false
 
-  # --- dialog widgets: approval primitive, never gated ---
+  # --- dialog widgets (agent-invoked termux-dialog verbs) ---
   - name: dialog.confirm
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-dialog", "confirm", "-t", "{{.title}}"]
     args:
       - {name: title, flag: -t, type: string, required: false}
@@ -657,8 +513,6 @@ verbs:
 
   - name: dialog.text
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-dialog", "text", "-t", "{{.title}}"]
     args:
       - {name: title, flag: -t, type: string, required: false}
@@ -668,8 +522,6 @@ verbs:
 
   - name: dialog.checkbox
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-dialog", "checkbox", "-t", "{{.title}}", "-v", "{{.values}}"]
     args:
       - {name: title, flag: -t, type: string, required: false}
@@ -680,8 +532,6 @@ verbs:
 
   - name: dialog.counter
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-dialog", "counter", "-t", "{{.title}}"]
     args:
       - {name: title, flag: -t, type: string, required: false}
@@ -691,8 +541,6 @@ verbs:
 
   - name: dialog.date
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-dialog", "date", "-t", "{{.title}}"]
     args:
       - {name: title, flag: -t, type: string, required: false}
@@ -702,8 +550,6 @@ verbs:
 
   - name: dialog.radio
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-dialog", "radio", "-t", "{{.title}}", "-v", "{{.values}}"]
     args:
       - {name: title, flag: -t, type: string, required: false}
@@ -714,8 +560,6 @@ verbs:
 
   - name: dialog.sheet
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-dialog", "sheet", "-t", "{{.title}}", "-v", "{{.values}}"]
     args:
       - {name: title, flag: -t, type: string, required: false}
@@ -726,8 +570,6 @@ verbs:
 
   - name: dialog.spinner
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-dialog", "spinner", "-t", "{{.title}}", "-v", "{{.values}}"]
     args:
       - {name: title, flag: -t, type: string, required: false}
@@ -738,8 +580,6 @@ verbs:
 
   - name: dialog.speech
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-dialog", "speech", "-t", "{{.title}}"]
     args:
       - {name: title, flag: -t, type: string, required: false}
@@ -749,8 +589,6 @@ verbs:
 
   - name: dialog.time
     tier: B
-    risk: low
-    approval: inherit
     argv: ["termux-dialog", "time", "-t", "{{.title}}"]
     args:
       - {name: title, flag: -t, type: string, required: false}

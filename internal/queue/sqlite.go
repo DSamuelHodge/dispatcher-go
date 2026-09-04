@@ -559,12 +559,9 @@ func scanTask(row scannable) (*Task, error) {
 	if lastOut.Valid {
 		t.LastAttemptOutcome = lastOut.String
 	}
-	if apprMode.Valid {
-		t.ApprovalMode = apprMode.String
-	}
-	if apprBy.Valid {
-		t.ApprovedBy = apprBy.String
-	}
+	// approval_mode/approved_by columns retained for schema compat; ignored.
+	_ = apprMode
+	_ = apprBy
 	if exitCode.Valid {
 		v := int(exitCode.Int64)
 		t.ExitCode = &v
@@ -610,7 +607,7 @@ UPDATE tasks SET verb=?, args_json=?, argv_json=?, argv_redacted=?, stdin_blob=?
  exit_code=?, stdout=?, stderr=?, result_json=?, error=?, updated_at=?
 WHERE id=?`,
 		t.Verb, t.ArgsJSON, t.ArgvJSON, string(argvR), t.StdinBlob, boolInt(t.StdinPresent),
-		t.State, t.Attempt, t.MaxRetries, next, nullStr(t.LastAttemptOutcome), nullStr(t.ApprovalMode), nullStr(t.ApprovedBy),
+		t.State, t.Attempt, t.MaxRetries, next, nullStr(t.LastAttemptOutcome), nil, nil,
 		ec, t.Stdout, t.Stderr, nullStr(resJSON), nullStr(t.Error), fmtTime(t.UpdatedAt), t.ID,
 	)
 	if err != nil {

@@ -50,7 +50,7 @@ func TestResumeAcceptedFailsClosed(t *testing.T) {
 	}
 	defer st.Close()
 
-	// Freshly created (accepted, never through the approval gate)...
+	// Freshly created (accepted, accept incomplete)...
 	a, _ := st.Create(queue.CreateInput{Verb: "a", ArgsJSON: "{}", Argv: []string{"true"}, ArgvRedacted: []string{"true"}, MaxRetries: 5})
 	// ...and one stuck in pending_approval.
 	p, _ := st.Create(queue.CreateInput{Verb: "p", ArgsJSON: "{}", Argv: []string{"true"}, ArgvRedacted: []string{"true"}, MaxRetries: 5})
@@ -64,16 +64,16 @@ func TestResumeAcceptedFailsClosed(t *testing.T) {
 		t.Fatalf("accepted state=%s, want canceled (fail closed)", ga.State)
 	}
 	gp, _ := st.Get(p.ID)
-	if gp.State != queue.StateDenied {
-		t.Fatalf("pending_approval state=%s, want denied", gp.State)
+	if gp.State != queue.StateCanceled {
+		t.Fatalf("pending_approval state=%s, want canceled", gp.State)
 	}
 	// Both terminal transitions must be audited (ADR-0002). Create() alone
-	// writes no outbox row, so exactly the canceled + denied rows remain.
+	// writes no outbox row, so exactly the two canceled transitions rows remain.
 	n, err := st.DrainOutbox(nil, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n != 2 {
-		t.Fatalf("outbox drained=%d, want 2 (canceled + denied)", n)
+		t.Fatalf("outbox drained=%d, want 2 (two canceled transitions)", n)
 	}
 }

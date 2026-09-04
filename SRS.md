@@ -19,8 +19,7 @@ retry, circuit-breaking, and bounded streaming subscriptions — all driven by a
 - Declarative verb catalog (`verbs.yaml` v1) covering Tier A (perceive) and Tier B (one-shot act +
   watch streams) from the verified Termux:API surface (§5 of spec).
 - Token auth (`X-Agent-Token`, `.agent-token` chmod 0600).
-- Approval gate (`ask` via `termux-dialog confirm` 120s block; `always-approve` auto-execute;
-  `force_ask` override; `~/.agent/approval-policy.json` runtime merge; future `approval_backend: float`).
+- Full agent autonomy after token auth (no human confirm gate; no approval_mode / unattended switches).
 - Secret hygiene (`stdin:true` piped + `[REDACTED]` everywhere).
 - NDJSON audit log (`logs/audit.log`, fsync/line, lifecycle
   `requested → approved|denied → executing → executed|timeout|failed|will-retry|exhausted`).
@@ -84,10 +83,7 @@ Task states (normative): spec §9.1 — `accepted`, `pending_approval`, `approve
 - FR-2.4 Streams: `POST /v1/streams {verb, args}` → `{stream_id}`; `GET /v1/streams/{id}?since=`;
   `DELETE /v1/streams/{id}` (kill proc, free buffer, audit entry). Unknown/closed id → 404.
 - FR-2.5 `GET /v1/verbs` (effective catalog), `GET /v1/health`
-  `{mode, approval{daemon_mode, policy_mode, effective_global, backend, policy_path,
-  force_ask_verbs, per_verb_ask, per_verb_always}, queue_depth, cb_states, resume, uptime}`.
-  There is no single "effective mode for all verbs": force_ask verbs still gate under
-  global always-approve; per-verb resolution is authoritative.
+  `{autonomy, queue_depth, cb_states, resume, uptime, version}`.
 - FR-2.6 Queue capacity is enforced atomically inside the store
   (`CreateAndAuditLimited`): capacity check + task insert + audit outbox commit in one
   transaction/lock; concurrent callers that lose the race receive `503 queue_full` and
@@ -98,17 +94,11 @@ Task states (normative): spec §9.1 — `accepted`, `pending_approval`, `approve
 - FR-3.1 All requests require `X-Agent-Token`, constant-time compare; 401 on mismatch.
 - FR-3.2 Token persisted in `.agent-token` (0600, generated `rand 32B hex` on first boot).
 
-### FR-4 Approval & redaction
+### FR-4 Autonomy & redaction
 
-- FR-4.1 Resolution order: `force_ask` > per-verb > `approval-policy.json` > `daemon.approval_mode`.
-- FR-4.2 `ask`: run `termux-dialog confirm -t "Approve <verb>?"` (redacted args), 120s block;
-  `yes` → approved; else/timeout → denied. Denied/canceled NEVER retry.
-- FR-4.3 `always-approve`: auto-execute, audit `approved{by:"policy"}`. Explicitly user-enabled only.
-- FR-4.5 Unattended (remote-agent full autonomy): `-unattended` (or `DISPATCHER_UNATTENDED=1`)
-  makes an explicit global `always-approve` absolute, overriding per-verb `ask` and `force_ask`
-  gates. Without global `always-approve` it changes nothing. Every bypassed approval audits
-  `unattended:true`; `/v1/health` reports `approval.unattended`.
-- FR-4.4 `stdin:true`: body → child stdin pipe; `[REDACTED]` in dialog, task GET, audit, SQLite.
+- FR-4.1 After token auth and catalog validation, every verb/stream executes without a human gate.
+- FR-4.2 `stdin:true`: body → child stdin pipe; `[REDACTED]` in task GET, audit, SQLite.
+- FR-4.3 `/v1/health` reports `"autonomy":"full"`.
 
 ### FR-5 Audit
 
@@ -138,7 +128,7 @@ Task states (normative): spec §9.1 — `accepted`, `pending_approval`, `approve
 ## 6. Non-functional requirements
 
 - NFR-1 Security: loopback-only bind; no TLS (loopback); no shell; no remote expose; 0600 token;
-  redaction total; `force_ask` cannot be overridden by global auto.
+  redaction total; token holder has full verb autonomy.
 - NFR-2 Reliability: WAL+FULL durability; idempotent resume; bounded streams; proc-group kill on
   DELETE/timeout; no goroutine/process leaks.
 - NFR-3 Observability: audit fsync; health endpoint; per-attempt rows; `go test` + fake-PATH shim CI.
@@ -182,8 +172,7 @@ Task `state` values: see spec §9.1. Attempt `outcome`: `ok|timeout|failed`.
 ## 9. Acceptance criteria (MVP)
 
 1. `battery.status` round-trips against real `termux-battery-status` with token; wrong token → 401.
-2. `sms.send` in `ask` mode: task enters `pending_approval`, blocks on real `termux-dialog confirm`;
-   deny → task state `denied`, no retry, audited.
+2. `sms.send` executes without a confirm dialog; secret stdin never appears in audit/GET.
 3. `stdin:true` secret appears nowhere (audit log, outbox payload, GET, dialog, db) — grep test passes.
 4. Kill -9 mid-`executing` → reboot resumes task as `pending` in `created_at` order; no phantom `executed`.
 5. Failure of attempt index `max_retries` → task `exhausted` + real `termux-notification`; CB opens after 5, half-open recovers.

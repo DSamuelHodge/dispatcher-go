@@ -1,7 +1,8 @@
+// Package approve holds secret-redaction helpers for audit/task surfaces.
+// Human approval gates were removed: agents execute verbs with full autonomy.
 package approve
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/DSamuelHodge/dispatcher-go/internal/verbs"
@@ -31,16 +32,6 @@ func RedactArgs(v verbs.Verb, args map[string]any) map[string]any {
 		out[k] = val
 	}
 	return out
-}
-
-// DialogBody builds a redacted one-line summary for the confirm prompt.
-func DialogBody(v verbs.Verb, argvRedacted []string) string {
-	return fmt.Sprintf("%s %s", v.Name, strings.Join(argvRedacted, " "))
-}
-
-// DialogTitle is the confirm title.
-func DialogTitle(verbName string) string {
-	return fmt.Sprintf("Approve %s?", verbName)
 }
 
 // ContainsSecret reports whether haystack includes any secret cleartext values.

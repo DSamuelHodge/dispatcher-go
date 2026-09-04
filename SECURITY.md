@@ -6,14 +6,14 @@ This project is pre-1.0. Security fixes land on `main` only.
 
 ## What this software can do
 
-`dispatcher-go` mediates access to **Termux:API** device capabilities (SMS, telephony, clipboard, camera, microphone, keystore, location, etc.) for a local AI agent. A compromised token or malicious verb catalog is equivalent to local agent compromise with user-approved (or `always-approve`) device actions.
+`dispatcher-go` mediates access to **Termux:API** device capabilities (SMS, telephony, clipboard, camera, microphone, keystore, location, etc.) for a local AI agent. A compromised token or malicious verb catalog is equivalent to full device-capability access for every catalog verb.
 
 ## Threat model (summary)
 
 - Bind **127.0.0.1 only** — do not expose via SSH reverse tunnels, ngrok, or LAN.
 - **Token** in `.agent-token` mode `0600`; treat like a password.
-- **High-risk verbs** (`sms.send`, `telephony.call`, keystore, mic, …) use `force_ask_even_if_global_auto` and must not be silently auto-approved.
-- Secrets use `stdin` piping and must appear as `[REDACTED]` in audit, dialogs, task GET, and SQLite `argv_redacted`.
+- **Token = full autonomy** for every catalog verb (`sms.send`, `telephony.call`, keystore, mic, …). There is no on-device confirm gate.
+- Secrets use `stdin` piping and must appear as `[REDACTED]` in audit, task GET, and SQLite `argv_redacted`.
 - No shell interpolation of argv.
 
 ## Reporting a vulnerability
@@ -37,8 +37,8 @@ You should receive an acknowledgement within 7 days. We ask for reasonable time 
 
 ## Hardening checklist for operators
 
-- Keep `approval_mode: ask` unless you fully accept `always-approve` risk
-- Never copy `.agent-token` off-device
+- Treat `.agent-token` as full device control; never copy it off-device casually
+- Rotate the token (delete file + restart) after any suspected leak
 - Review `verbs.yaml` changes like code review
 - Monitor `logs/audit.log` / outbox for unexpected high-risk verbs
 - Do not run the binary as a shared multi-user service

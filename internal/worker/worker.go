@@ -95,7 +95,7 @@ func (w *Worker) execute(ctx context.Context, task *queue.Task) {
 				t.NextRunAt = &next
 				t.Error = "circuit_open"
 			}, audit.Event{
-				TaskID: task.ID, Verb: task.Verb, Tier: string(v.Tier), Risk: string(v.Risk),
+				TaskID: task.ID, Verb: task.Verb, Tier: string(v.Tier),
 				State: "circuit_open", ArgvRedacted: task.ArgvRedacted, Error: "circuit_open",
 			})
 			return
@@ -110,7 +110,7 @@ func (w *Worker) execute(ctx context.Context, task *queue.Task) {
 	_ = w.Store.UpdateAndAudit(task.ID, func(t *queue.Task) {
 		t.State = queue.StateExecuting
 	}, audit.Event{
-		TaskID: task.ID, Verb: task.Verb, Tier: string(v.Tier), Risk: string(v.Risk),
+		TaskID: task.ID, Verb: task.Verb, Tier: string(v.Tier),
 		State: queue.StateExecuting, ArgvRedacted: task.ArgvRedacted, Attempt: n,
 	})
 	res := execx.Run(ctx, task.Argv(), task.StdinBlob, timeout)
@@ -167,7 +167,7 @@ func (w *Worker) execute(ctx context.Context, task *queue.Task) {
 			t.Error = ""
 			t.NextRunAt = nil
 		}, audit.Event{
-			TaskID: task.ID, Verb: task.Verb, Tier: string(v.Tier), Risk: string(v.Risk),
+			TaskID: task.ID, Verb: task.Verb, Tier: string(v.Tier),
 			State: queue.StateExecuted, ArgvRedacted: task.ArgvRedacted, ExitCode: &ec,
 			LatencyMS: lat, Attempt: n,
 		})
@@ -191,7 +191,7 @@ func (w *Worker) execute(ctx context.Context, task *queue.Task) {
 			t.Error = errMsg
 			t.NextRunAt = nil
 		}, audit.Event{
-			TaskID: task.ID, Verb: task.Verb, Tier: string(v.Tier), Risk: string(v.Risk),
+			TaskID: task.ID, Verb: task.Verb, Tier: string(v.Tier),
 			State: queue.StateExhausted, ArgvRedacted: task.ArgvRedacted, ExitCode: &ec,
 			LatencyMS: lat, Attempt: n, Error: errMsg,
 		})
@@ -211,7 +211,7 @@ func (w *Worker) execute(ctx context.Context, task *queue.Task) {
 		t.Attempt = n + 1
 		t.NextRunAt = &next
 	}, audit.Event{
-		TaskID: task.ID, Verb: task.Verb, Tier: string(v.Tier), Risk: string(v.Risk),
+		TaskID: task.ID, Verb: task.Verb, Tier: string(v.Tier),
 		State: "will-retry", ArgvRedacted: task.ArgvRedacted, ExitCode: &ec,
 		LatencyMS: lat, Attempt: n, Error: errMsg,
 	})

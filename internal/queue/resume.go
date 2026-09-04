@@ -25,11 +25,9 @@ func Resume(store Store, now time.Time) (ResumeStats, error) {
 	if store == nil {
 		return st, fmt.Errorf("nil store")
 	}
-	// Memory + SQLite both support List
 	for _, t := range store.List(StateExecuting) {
 		err := store.Update(t.ID, func(tk *Task) {
 			tk.State = StatePending
-			// clear any partial outcome; do not mark executed
 			tk.Error = "resumed after crash (was executing)"
 		})
 		if err != nil {
@@ -45,30 +43,28 @@ func Resume(store Store, now time.Time) (ResumeStats, error) {
 			st.RetryFuture++
 		}
 	}
-	// accepted means created but never through the approval gate (the gate
-	// runs inline right after Create). Fail closed: cancel rather than
-	// making a never-approved task runnable. Audited like every terminal
-	// transition (ADR-0002).
+	// accepted means created but pipeline never finished (crash mid-request).
+	// Fail closed: cancel rather than making a half-created task runnable.
 	for _, t := range store.List(StateAccepted) {
 		err := store.UpdateAndAudit(t.ID, func(tk *Task) {
 			tk.State = StateCanceled
-			tk.Error = "canceled on restart: never passed approval gate"
+			tk.Error = "canceled on restart: accept incomplete"
 		}, audit.Event{
 			TaskID: t.ID, Verb: t.Verb, State: StateCanceled,
-			ArgvRedacted: t.ArgvRedacted, Error: "canceled on restart: never passed approval gate",
+			ArgvRedacted: t.ArgvRedacted, Error: "canceled on restart: accept incomplete",
 		})
 		if err != nil {
 			return st, err
 		}
 	}
-	// pending_approval at crash → denied (cannot complete dialog safely) — safer than hanging
+	// Legacy pending_approval rows (pre-autonomy builds) → canceled.
 	for _, t := range store.List(StatePendingApproval) {
 		err := store.UpdateAndAudit(t.ID, func(tk *Task) {
-			tk.State = StateDenied
-			tk.Error = "approval interrupted by crash"
+			tk.State = StateCanceled
+			tk.Error = "canceled on restart: legacy pending_approval"
 		}, audit.Event{
-			TaskID: t.ID, Verb: t.Verb, State: StateDenied,
-			ArgvRedacted: t.ArgvRedacted, Error: "approval interrupted by crash",
+			TaskID: t.ID, Verb: t.Verb, State: StateCanceled,
+			ArgvRedacted: t.ArgvRedacted, Error: "canceled on restart: legacy pending_approval",
 		})
 		if err != nil {
 			return st, err

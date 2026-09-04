@@ -27,8 +27,6 @@ func TestWorkerCircuitOpens(t *testing.T) {
 version: 1
 daemon:
   listen: "127.0.0.1:8477"
-  approval_mode: always-approve
-  approval_backend: dialog
   task_timeout_s: 2
   max_retries: 20
   backoff_base_s: 0.001
@@ -39,8 +37,6 @@ daemon:
 verbs:
   - name: always.fail
     tier: B
-    risk: low
-    approval: always-approve
     argv: ["termux-toast", "x"]
     parser: exit
     watch: false

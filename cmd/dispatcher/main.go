@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/DSamuelHodge/dispatcher-go/internal/api"
-	"github.com/DSamuelHodge/dispatcher-go/internal/approve"
 	"github.com/DSamuelHodge/dispatcher-go/internal/audit"
 	"github.com/DSamuelHodge/dispatcher-go/internal/auth"
 	"github.com/DSamuelHodge/dispatcher-go/internal/circuit"
@@ -24,7 +23,7 @@ import (
 )
 
 // Version is set via -ldflags "-X main.Version=..." at release build time.
-var Version = "0.8.0"
+var Version = "0.9.0"
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -38,11 +37,9 @@ func run(args []string) int {
 	validateOnly := fs.Bool("validate", false, "load and validate verbs.yaml then exit")
 	tokenPath := fs.String("token-file", auth.DefaultFileName, "path to agent token file (0600)")
 	dataDir := fs.String("data-dir", ".", "base directory for token/logs/db relative paths")
-	policyPath := fs.String("policy-file", "", "approval-policy.json path")
 	auditPath := fs.String("audit-log", "", "NDJSON audit log path (default: <data-dir>/logs/audit.log)")
 	dbPath := fs.String("db", "", "SQLite tasks db (default: <data-dir>/data/tasks.db)")
-	syncExec := fs.Bool("sync-exec", false, "run first attempt inline after approval (debug); default uses worker")
-	unattended := fs.Bool("unattended", os.Getenv("DISPATCHER_UNATTENDED") == "1", "remote-agent full autonomy: explicit global always-approve becomes absolute, overriding per-verb ask and force_ask gates (audited + in /v1/health)")
+	syncExec := fs.Bool("sync-exec", false, "run first attempt inline after accept (debug); default uses worker")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -75,21 +72,6 @@ func run(args []string) int {
 	tok, err := auth.LoadOrCreate(tokFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dispatcher: token: %v\n", err)
-		return 1
-	}
-
-	polFile := *policyPath
-	if polFile == "" {
-		cand := filepath.Join(*dataDir, ".agent", "approval-policy.json")
-		if _, err := os.Stat(cand); err == nil {
-			polFile = cand
-		} else if home, err := os.UserHomeDir(); err == nil {
-			polFile = filepath.Join(home, ".agent", "approval-policy.json")
-		}
-	}
-	policy, err := approve.LoadPolicy(polFile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "dispatcher: policy: %v\n", err)
 		return 1
 	}
 
@@ -129,14 +111,7 @@ func run(args []string) int {
 
 	srv := api.New(cat, tok, store)
 	srv.Version = Version
-	srv.Unattended = *unattended
-	if *unattended {
-		fmt.Fprintf(os.Stderr, "dispatcher: WARNING: unattended mode ON — force_ask verbs auto-approve under global always-approve (no human gate)\n")
-	}
-	srv.Policy = policy
-	srv.PolicyPath = polFile
 	srv.Audit = alog
-	srv.Prompter = approve.DialogPrompter{}
 	srv.SyncExec = *syncExec
 	srv.Circuits = circuits
 	srv.Resume = resumeStats

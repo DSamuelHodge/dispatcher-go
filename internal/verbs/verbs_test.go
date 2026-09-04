@@ -11,8 +11,6 @@ const minimalYAML = `
 version: 1
 daemon:
   listen: "127.0.0.1:8477"
-  approval_mode: ask
-  approval_backend: dialog
   task_timeout_s: 30
   max_retries: 5
   backoff_base_s: 1
@@ -23,8 +21,6 @@ daemon:
 verbs:
   - name: battery.status
     tier: A
-    risk: none
-    approval: inherit
     argv: ["termux-battery-status"]
     parser: json
     watch: false
@@ -83,15 +79,11 @@ func TestAllowTemplateTokens(t *testing.T) {
 	y := strings.Replace(minimalYAML,
 		`- name: battery.status
     tier: A
-    risk: none
-    approval: inherit
     argv: ["termux-battery-status"]
     parser: json
     watch: false`,
 		`- name: location.once
     tier: A
-    risk: low
-    approval: inherit
     argv: ["termux-location", "-p", "{{.provider}}", "-r", "once"]
     parser: json
     watch: false`, 1)
@@ -151,8 +143,6 @@ func TestRejectUnknownArgField(t *testing.T) {
 version: 1
 daemon:
   listen: "127.0.0.1:8477"
-  approval_mode: ask
-  approval_backend: dialog
   task_timeout_s: 30
   max_retries: 5
   backoff_base_s: 1
@@ -163,8 +153,6 @@ daemon:
 verbs:
   - name: call-log.read
     tier: A
-    risk: medium
-    approval: inherit
     argv: ["termux-call-log"]
     args:
       - {name: limit, flag: -l, type: int, required: false, requird: true}
@@ -182,15 +170,11 @@ func TestStreamAllowlist(t *testing.T) {
 		return strings.Replace(minimalYAML,
 			`- name: battery.status
     tier: A
-    risk: none
-    approval: inherit
     argv: ["termux-battery-status"]
     parser: json
     watch: false`,
 			`- name: `+name+`
     tier: B
-    risk: low
-    approval: inherit
     argv: ["`+argv0+`"]
     parser: json
     watch: {mode: stream, buffer: 32}`, 1)

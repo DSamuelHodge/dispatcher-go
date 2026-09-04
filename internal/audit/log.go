@@ -16,18 +16,12 @@ type Event struct {
 	TaskID       string   `json:"task_id"`
 	Verb         string   `json:"verb"`
 	Tier         string   `json:"tier,omitempty"`
-	Risk         string   `json:"risk,omitempty"`
-	Approval     string   `json:"approval,omitempty"`
-	ApprovedBy   string   `json:"approved_by,omitempty"`
 	State        string   `json:"state"`
 	ArgvRedacted []string `json:"argv_redacted,omitempty"`
 	ExitCode     *int     `json:"exit_code,omitempty"`
 	LatencyMS    int64    `json:"latency_ms,omitempty"`
 	Attempt      int      `json:"attempt,omitempty"`
 	Error        string   `json:"error,omitempty"`
-	// Unattended marks approvals granted by the -unattended force_ask
-	// override (remote-agent full autonomy). Only set on approved events.
-	Unattended bool `json:"unattended,omitempty"`
 }
 
 // maxMemEvents bounds the in-memory ring used by Mem/Contains (test and

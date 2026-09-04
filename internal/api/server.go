@@ -11,6 +11,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,14 +33,9 @@ type Server struct {
 	Catalog *verbs.Catalog
 	Token   *auth.Token
 	Tasks   queue.Store
-	Policy  approve.PolicyFile
-	// PolicyPath is the runtime approval-policy.json location, surfaced in
-	// /v1/health when set.
-	PolicyPath string
 	// Version is the daemon build version, surfaced in /v1/health.
 	// Set from main.Version; empty means a dev build.
 	Version   string
-	Prompter  approve.Prompter
 	Audit     *audit.Logger
 	Circuits  *circuit.Registry
 	Streams   *streams.Registry
@@ -46,24 +43,17 @@ type Server struct {
 	StartedAt time.Time
 	// Notifier delivers exhaustion alerts (defaults to Termux).
 	Notifier notify.Notifier
-	// SyncExec runs approval+first-exec inline (tests / simple mode).
-	// When false, after approval the task is left pending for the worker.
+	// SyncExec runs first exec inline (tests / simple mode).
+	// When false, the task is left pending for the worker.
 	SyncExec bool
-	// Unattended enables the remote-agent full-autonomy escape hatch: an
-	// explicit global always-approve becomes absolute, overriding per-verb
-	// ask and force_ask gates (see approve.ResolveUnattended). Without
-	// global always-approve it changes nothing. Surfaced in /v1/health
-	// and audited on every bypassed approval.
-	Unattended bool
 }
 
-// New constructs a server with dialog prompter by default.
+// New constructs a server with Termux notifier defaults.
 func New(cat *verbs.Catalog, tok *auth.Token, tasks queue.Store) *Server {
 	return &Server{
 		Catalog:   cat,
 		Token:     tok,
 		Tasks:     tasks,
-		Prompter:  approve.DialogPrompter{},
 		Notifier:  notify.Termux{},
 		StartedAt: time.Now().UTC(),
 		SyncExec:  true,
@@ -74,6 +64,9 @@ func New(cat *verbs.Catalog, tok *auth.Token, tasks queue.Store) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", s.handleHealth)
+	// Progressive verb disclosure: search and get-one before list.
+	mux.HandleFunc("GET /v1/verbs/search", s.handleSearchVerbs)
+	mux.HandleFunc("GET /v1/verbs/{name}", s.handleGetVerb)
 	mux.HandleFunc("GET /v1/verbs", s.handleListVerbs)
 	mux.HandleFunc("POST /v1/verbs/{name}", s.handlePostVerb)
 	mux.HandleFunc("GET /v1/tasks/{id}", s.handleGetTask)
@@ -141,59 +134,6 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 	})
 }
 
-func (s *Server) effectiveMode() string {
-	if s.Policy.ApprovalMode != "" {
-		return s.Policy.ApprovalMode
-	}
-	return string(s.Catalog.Daemon.ApprovalMode)
-}
-
-// approvalSummary aggregates gate-relevant fields for /v1/health.
-// There is intentionally no single "effective mode for all verbs":
-// force_ask_even_if_global_auto verbs still prompt under a global
-// always-approve, so only per-verb resolution is authoritative.
-func (s *Server) approvalSummary() map[string]any {
-	daemonMode := strings.TrimSpace(string(s.Catalog.Daemon.ApprovalMode))
-	policyMode := strings.TrimSpace(s.Policy.ApprovalMode)
-	effective := daemonMode
-	if policyMode != "" {
-		effective = policyMode
-	}
-	forceAsk, perVerbAsk, perVerbAlways := 0, 0, 0
-	var forceAskNames []string
-	for _, name := range s.Catalog.Order {
-		v := s.Catalog.ByName[name]
-		if v.ForceAskEvenIfGlobalAuto {
-			forceAsk++
-			forceAskNames = append(forceAskNames, name)
-		}
-		switch v.Approval {
-		case verbs.ApprovalAsk:
-			perVerbAsk++
-		case verbs.ApprovalAlwaysApprove:
-			perVerbAlways++
-		}
-	}
-	out := map[string]any{
-		"daemon_mode":      daemonMode,
-		"policy_mode":      policyMode, // empty when no policy-file override
-		"effective_global": effective,
-		"backend":          string(s.Catalog.Daemon.ApprovalBackend),
-		"force_ask_verbs":  forceAsk,
-		"force_ask_names":  forceAskNames,
-		"per_verb_ask":     perVerbAsk,
-		"per_verb_always":  perVerbAlways,
-		"prompt_timeout_s": 120,
-		// unattended (-unattended flag) lets global always-approve cover
-		// force_ask verbs: remote-agent full autonomy, no human gate.
-		"unattended": s.Unattended,
-	}
-	if s.PolicyPath != "" {
-		out["policy_path"] = s.PolicyPath
-	}
-	return out
-}
-
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	cb := map[string]any{}
 	if s.Circuits != nil {
@@ -206,8 +146,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		ver = "dev"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"mode":        s.effectiveMode(),
-		"approval":    s.approvalSummary(),
+		"autonomy":    "full",
 		"queue_depth": s.Tasks.Depth(),
 		"cb_states":   cb,
 		"resume":      s.Resume,
@@ -217,19 +156,43 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListVerbs(w http.ResponseWriter, r *http.Request) {
-	list := make([]map[string]any, 0, len(s.Catalog.Order))
-	for _, name := range s.Catalog.Order {
-		v := s.Catalog.ByName[name]
-		list = append(list, map[string]any{
-			"name":     v.Name,
-			"tier":     v.Tier,
-			"risk":     v.Risk,
-			"approval": v.Approval,
-			"argv":     v.Argv,
-			"parser":   v.Parser,
-		})
+	detail := r.URL.Query().Get("detail")
+	if detail == "" {
+		detail = DetailSummary
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"verbs": list})
+	out, err := listVerbsDetail(s.Catalog, detail)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_detail", err.Error(), "")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleSearchVerbs(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("q")
+	if q == "" {
+		q = r.URL.Query().Get("query")
+	}
+	limit := 8
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			writeErr(w, http.StatusBadRequest, "invalid_limit", fmt.Sprintf("bad limit %q", raw), "")
+			return
+		}
+		limit = n
+	}
+	writeJSON(w, http.StatusOK, searchVerbs(s.Catalog, q, limit))
+}
+
+func (s *Server) handleGetVerb(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	v, ok := s.Catalog.Get(name)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "unknown_verb", fmt.Sprintf("verb %q not found", name), "")
+		return
+	}
+	writeJSON(w, http.StatusOK, verbFullEntry(v))
 }
 
 type postVerbBody struct {
@@ -318,8 +281,8 @@ func (s *Server) handlePostVerb(w http.ResponseWriter, r *http.Request) {
 		Stdin:        body.Stdin,
 		MaxRetries:   maxRetries,
 	}, audit.Event{
-		Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
-		State: queue.StateAccepted, ArgvRedacted: argvRedacted, Approval: string(v.Approval),
+		Verb: v.Name, Tier: string(v.Tier),
+		State: queue.StateAccepted, ArgvRedacted: argvRedacted,
 	}, s.Catalog.Daemon.MaxQueueDepth)
 	if err != nil {
 		if errors.Is(err, queue.ErrQueueFull) {
@@ -342,7 +305,7 @@ func (s *Server) handlePostVerb(w http.ResponseWriter, r *http.Request) {
 					t.State = queue.StateCanceled
 					t.Error = "superseded by idempotent replay"
 				}, audit.Event{
-					TaskID: task.ID, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
+					TaskID: task.ID, Verb: v.Name, Tier: string(v.Tier),
 					State: queue.StateCanceled, ArgvRedacted: argvRedacted, Error: "superseded by idempotent replay",
 				})
 				if t, ok := s.Tasks.Get(win.TaskID); ok {
@@ -359,7 +322,7 @@ func (s *Server) handlePostVerb(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Approval runs inline; execution is SyncExec (inline once) or pending for worker.
+	// Execution is SyncExec (inline once) or pending for the worker.
 	s.runPipeline(r.Context(), task.ID, v, br, argv, argvRedacted, body.Stdin)
 	taskID := task.ID
 	task, ok = s.Tasks.Get(taskID)
@@ -402,61 +365,13 @@ func idempotencyHash(verb string, args map[string]any, stdin string) string {
 }
 
 func (s *Server) runPipeline(ctx context.Context, id string, v verbs.Verb, br *circuit.Breaker, argv, argvRedacted []string, stdin string) {
-	dec := approve.ResolveUnattended(v, s.Catalog.Daemon, s.Policy, s.Unattended)
-	_ = s.Tasks.Update(id, func(t *queue.Task) {
-		t.ApprovalMode = string(dec.Mode)
+	// Full autonomy: no human gate. Audit accept→execute path only.
+	_ = s.Tasks.UpdateAndAudit(id, func(t *queue.Task) {
+		// no-op marker; state advances in executeOnce or pending handoff
+	}, audit.Event{
+		TaskID: id, Verb: v.Name, Tier: string(v.Tier),
+		State: "accepted", ArgvRedacted: argvRedacted,
 	})
-
-	if dec.NeedsPrompt {
-		_ = s.Tasks.UpdateAndAudit(id, func(t *queue.Task) {
-			t.State = queue.StatePendingApproval
-		}, audit.Event{
-			TaskID: id, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
-			State: queue.StatePendingApproval, ArgvRedacted: argvRedacted, Approval: string(dec.Mode),
-		})
-
-		prompter := s.Prompter
-		if prompter == nil {
-			prompter = approve.DialogPrompter{}
-		}
-		title := approve.DialogTitle(v.Name)
-		body := approve.DialogBody(v, argvRedacted)
-		if approve.ContainsSecret(body, stdin) {
-			body = v.Name + " " + approve.RedactedMarker
-		}
-		res := prompter.Confirm(ctx, title, body, approve.DefaultPromptTimeout)
-		if res.TimedOut || res.Err != nil || !res.Approved {
-			errMsg := "denied"
-			if res.TimedOut {
-				errMsg = "approval timeout"
-			} else if res.Err != nil {
-				errMsg = res.Err.Error()
-			}
-			_ = s.Tasks.UpdateAndAudit(id, func(t *queue.Task) {
-				t.State = queue.StateDenied
-				t.Error = errMsg
-			}, audit.Event{
-				TaskID: id, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
-				State: queue.StateDenied, ArgvRedacted: argvRedacted, Approval: string(dec.Mode),
-				Error: errMsg,
-			})
-			return
-		}
-		_ = s.Tasks.UpdateAndAudit(id, func(t *queue.Task) {
-			t.ApprovedBy = "user"
-		}, audit.Event{
-			TaskID: id, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
-			State: "approved", ApprovedBy: "user", ArgvRedacted: argvRedacted, Approval: string(dec.Mode),
-		})
-	} else {
-		_ = s.Tasks.UpdateAndAudit(id, func(t *queue.Task) {
-			t.ApprovedBy = dec.By
-		}, audit.Event{
-			TaskID: id, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
-			State: "approved", ApprovedBy: dec.By, ArgvRedacted: argvRedacted, Approval: string(dec.Mode),
-			Unattended: dec.Unattended,
-		})
-	}
 
 	runStdin := ""
 	if v.StdinArg != nil {
@@ -466,15 +381,12 @@ func (s *Server) runPipeline(ctx context.Context, id string, v verbs.Verb, br *c
 	if !s.SyncExec {
 		_ = s.Tasks.UpdateAndAudit(id, func(t *queue.Task) {
 			t.State = queue.StatePending
-			// persist stdin already on create
 		}, audit.Event{
-			TaskID: id, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
-			State: queue.StatePending, ArgvRedacted: argvRedacted, Approval: string(dec.Mode),
+			TaskID: id, Verb: v.Name, Tier: string(v.Tier),
+			State: queue.StatePending, ArgvRedacted: argvRedacted,
 		})
 		return
 	}
-	// SyncExec: first attempt inline; failures schedule retries for the
-	// worker (spec §9) instead of dying terminally.
 	maxRetries := s.Catalog.Daemon.MaxRetries
 	if v.Retries != nil {
 		maxRetries = *v.Retries
@@ -487,7 +399,7 @@ func (s *Server) executeOnce(ctx context.Context, id string, v verbs.Verb, br *c
 		t.State = queue.StateExecuting
 		t.Attempt = 0
 	}, audit.Event{
-		TaskID: id, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
+		TaskID: id, Verb: v.Name, Tier: string(v.Tier),
 		State: queue.StateExecuting, ArgvRedacted: argvRedacted, Attempt: 0,
 	})
 	start := time.Now()
@@ -541,7 +453,7 @@ func (s *Server) executeOnce(ctx context.Context, id string, v verbs.Verb, br *c
 			t.Error = ""
 			t.NextRunAt = nil
 		}, audit.Event{
-			TaskID: id, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
+			TaskID: id, Verb: v.Name, Tier: string(v.Tier),
 			State: queue.StateExecuted, ArgvRedacted: argvRedacted, ExitCode: &ec,
 			LatencyMS: lat, Attempt: 0,
 		})
@@ -562,7 +474,7 @@ func (s *Server) executeOnce(ctx context.Context, id string, v verbs.Verb, br *c
 			t.Error = errMsg
 			t.NextRunAt = nil
 		}, audit.Event{
-			TaskID: id, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
+			TaskID: id, Verb: v.Name, Tier: string(v.Tier),
 			State: queue.StateExhausted, ArgvRedacted: argvRedacted, ExitCode: &ec,
 			LatencyMS: lat, Attempt: 0, Error: errMsg,
 		})
@@ -584,7 +496,7 @@ func (s *Server) executeOnce(ctx context.Context, id string, v verbs.Verb, br *c
 		t.Attempt = 1
 		t.NextRunAt = &next
 	}, audit.Event{
-		TaskID: id, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
+		TaskID: id, Verb: v.Name, Tier: string(v.Tier),
 		State: "will-retry", ArgvRedacted: argvRedacted, ExitCode: &ec,
 		LatencyMS: lat, Attempt: 0, Error: errMsg,
 	})
@@ -627,7 +539,130 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "unknown_task", fmt.Sprintf("task %q not found", id), id)
 		return
 	}
-	writeJSON(w, http.StatusOK, t)
+	writeJSON(w, http.StatusOK, projectTask(t, r.URL.Query()))
+}
+
+// projectTask applies progressive result disclosure for agents.
+// Default is compact (no large stdout/stderr). Use detail=full for the raw task row.
+// fields= comma-list selects keys; max_stdout / max_stderr truncate byte lengths.
+func projectTask(t *queue.Task, q url.Values) any {
+	if t == nil {
+		return nil
+	}
+	detail := strings.ToLower(strings.TrimSpace(q.Get("detail")))
+	if detail == DetailFull || detail == "all" || detail == "raw" {
+		return t
+	}
+	maxOut := 512
+	if raw := q.Get("max_stdout"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
+			maxOut = n
+		}
+	}
+	maxErr := maxOut
+	if raw := q.Get("max_stderr"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
+			maxErr = n
+		}
+	}
+	compact := map[string]any{
+		"id":      t.ID,
+		"verb":    t.Verb,
+		"state":   t.State,
+		"attempt": t.Attempt,
+	}
+	if t.ExitCode != nil {
+		compact["exit_code"] = *t.ExitCode
+	}
+	if t.Error != "" {
+		compact["error"] = t.Error
+	}
+	if t.Result != nil {
+		compact["result"] = t.Result
+	}
+	if t.LastAttemptOutcome != "" {
+		compact["last_attempt_outcome"] = t.LastAttemptOutcome
+	}
+	// Include truncated stdout/stderr only when explicitly requested via fields
+	// or when detail=stdout.
+	fieldsRaw := strings.TrimSpace(q.Get("fields"))
+	wantStdout := detail == "stdout" || detail == "output"
+	wantStderr := wantStdout
+	wantArgv := false
+	if fieldsRaw != "" {
+		// Start from empty selection when fields is set.
+		selected := map[string]any{"id": t.ID}
+		for _, f := range strings.Split(fieldsRaw, ",") {
+			f = strings.TrimSpace(strings.ToLower(f))
+			switch f {
+			case "id":
+				selected["id"] = t.ID
+			case "verb":
+				selected["verb"] = t.Verb
+			case "state", "status":
+				selected["state"] = t.State
+			case "attempt":
+				selected["attempt"] = t.Attempt
+			case "exit_code":
+				if t.ExitCode != nil {
+					selected["exit_code"] = *t.ExitCode
+				}
+			case "error":
+				if t.Error != "" {
+					selected["error"] = t.Error
+				}
+			case "result":
+				if t.Result != nil {
+					selected["result"] = t.Result
+				}
+			case "stdout":
+				wantStdout = true
+			case "stderr":
+				wantStderr = true
+			case "argv_redacted", "argv":
+				wantArgv = true
+			case "created_at":
+				selected["created_at"] = t.CreatedAt
+			case "updated_at":
+				selected["updated_at"] = t.UpdatedAt
+			case "last_attempt_outcome":
+				if t.LastAttemptOutcome != "" {
+					selected["last_attempt_outcome"] = t.LastAttemptOutcome
+				}
+			}
+		}
+		if wantStdout && t.Stdout != "" {
+			selected["stdout"] = truncateStr(t.Stdout, maxOut)
+		}
+		if wantStderr && t.Stderr != "" {
+			selected["stderr"] = truncateStr(t.Stderr, maxErr)
+		}
+		if wantArgv {
+			selected["argv_redacted"] = t.ArgvRedacted
+		}
+		return selected
+	}
+	if wantStdout && t.Stdout != "" {
+		compact["stdout"] = truncateStr(t.Stdout, maxOut)
+	}
+	if wantStderr && t.Stderr != "" {
+		compact["stderr"] = truncateStr(t.Stderr, maxErr)
+	}
+	return compact
+}
+
+func truncateStr(s string, max int) string {
+	if max < 0 || len(s) <= max {
+		return s
+	}
+	if max == 0 {
+		return ""
+	}
+	// Prefer rune-safe cut for display; byte cut is fine for caps.
+	if max < 3 {
+		return s[:max]
+	}
+	return s[:max-3] + "..."
 }
 
 func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
@@ -674,34 +709,7 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "validation_error", err.Error(), "")
 		return
 	}
-	// P0: streams are Tier B watch verbs — they pass the same approval
-	// gate as one-shot verbs, not around it.
-	approval := approve.ResolveUnattended(v, s.Catalog.Daemon, s.Policy, s.Unattended)
-	approvedBy := approval.By
-	if approval.NeedsPrompt {
-		prompter := s.Prompter
-		if prompter == nil {
-			prompter = approve.DialogPrompter{}
-		}
-		res := prompter.Confirm(r.Context(), approve.DialogTitle(v.Name),
-			approve.DialogBody(v, argvRedacted), approve.DefaultPromptTimeout)
-		if res.TimedOut || res.Err != nil || !res.Approved {
-			errMsg := "denied"
-			if res.TimedOut {
-				errMsg = "approval timeout"
-			} else if res.Err != nil {
-				errMsg = res.Err.Error()
-			}
-			_ = s.audit(audit.Event{
-				TaskID: "", Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
-				State: queue.StateDenied, ArgvRedacted: argvRedacted,
-				Approval: string(approval.Mode), Error: errMsg,
-			})
-			writeErr(w, http.StatusForbidden, "approval_denied", errMsg, "")
-			return
-		}
-		approvedBy = "user"
-	}
+	// Streams start immediately under full agent autonomy.
 	br := s.breakerFor(v)
 	if br != nil {
 		if sn := br.Snapshot(); sn.State == circuit.Open {
@@ -721,10 +729,8 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 		br.Success()
 	}
 	_ = s.audit(audit.Event{
-		TaskID: st.ID, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
+		TaskID: st.ID, Verb: v.Name, Tier: string(v.Tier),
 		State: "stream_open", ArgvRedacted: argvRedacted,
-		Approval: string(approval.Mode), ApprovedBy: approvedBy,
-		Unattended: approval.Unattended,
 	})
 	_, _ = s.Tasks.DrainOutbox(s.Audit, 20)
 	writeJSON(w, http.StatusAccepted, map[string]any{"stream_id": st.ID, "verb": st.Verb})

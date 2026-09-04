@@ -24,8 +24,7 @@ permission prompts can fire):
     curl -H "X-Agent-Token: $TOKEN" http://127.0.0.1:$PORT/v1/streams/$ID?since=
     curl -X DELETE -H "X-Agent-Token: $TOKEN" http://127.0.0.1:$PORT/v1/streams/$ID
 
-    # high-risk verb — pops a termux-dialog confirm on the phone
-    # and blocks until you tap yes/no (120s timeout denies)
+    # mutating verb — executes immediately under full autonomy
     curl -X POST -H "X-Agent-Token: $TOKEN" -H 'Content-Type: application/json' \
       -d '{"args": {"number": "+15551234567"}, "stdin": "test"}' \
       http://127.0.0.1:$PORT/v1/verbs/sms.send
@@ -35,21 +34,19 @@ permission prompts can fire):
 Edit `verbs.yaml` only — no code changes needed for any Tier A/B command
 (including ones whose official script reads the payload from stdin: set
 `stdin_arg: {arg: <name>}` and the dispatcher pipes the value, redacting
-it in the audit log / confirm dialog).
+it in the audit log / task GET).
 
 Each entry needs `argv` (must start with a known `termux-*` binary, no
-shell), `args` with `flag`/`type`/`required`, `tier`, `risk`, and
-`approval` (`ask` / `always-approve` / `inherit`). Missing optional args
-are omitted flag-and-all, never passed as empty strings. Unknown YAML
-fields are rejected, so typos fail fast — check with:
+shell), `args` with `flag`/`type`/`required`, and `tier` (`A`/`B`).
+Missing optional args are omitted flag-and-all, never passed as empty
+strings. Unknown YAML fields are rejected, so typos fail fast — check with:
 
     go run ./cmd/dispatcher -catalog verbs.yaml -validate
 
 The classified upstream surface is in
 [termux-api-reference.md](termux-api-reference.md).
 `verbs.yaml` is what the dispatcher loads. Copy a reference row into the
-YAML with its real argv template and it is live everywhere (routing,
-approval gating, execution) on next daemon restart.
+YAML with its real argv template and it is live on next daemon restart.
 
 ## Tests
 
@@ -57,22 +54,26 @@ approval gating, execution) on next daemon restart.
     go vet ./...
     go run ./cmd/dispatcher -catalog verbs.yaml -validate
 
-## Approval model
+## Verb discovery (token-efficient)
 
-`force_ask` verbs > per-verb setting > `~/.agent/approval-policy.json` >
-daemon default. A global `always-approve` never silences `force_ask`
-verbs (keystore sign/generate, `nfc.write`, ...). `/v1/health` reports
-the full approval surface (`daemon_mode`, `policy_mode`,
-`effective_global`, `force_ask_names`, per-verb counts) — there is no
-single "effective mode for all verbs".
+Agents must not dump the full catalog into context every turn.
 
-The policy file is one object; a missing file means "no override":
+- `GET /v1/verbs` — **summary** by default (`name`, `tier`, one-line `summary`)
+- `GET /v1/verbs?detail=names` — names only
+- `GET /v1/verbs?detail=full` — full dump (operators/debug only)
+- `GET /v1/verbs/search?q=sms&limit=8` — ranked search
+- `GET /v1/verbs/{name}` — full schema for one verb before `POST`
+- `GET /v1/tasks/{id}` — **compact** by default; `?detail=full` for the raw row;
+  `?fields=state,result,stdout&max_stdout=512` to select/truncate
 
-    {"approval_mode": "always-approve"}   # or "ask"; anything else fails startup
+See `skills/dispatcher-go/SKILL.md` for the agent playbook.
 
-Point the daemon at it with `-policy-file ~/.agent/approval-policy.json`.
-Use it for away/DND stretches, then delete or flip back to `"ask"` —
-`force_ask` verbs still prompt either way.
+## Autonomy model
+
+There is no ask/always-approve/unattended switch. After token auth and
+catalog validation, verbs run. Secrets still use `stdin` piping and
+appear as `[REDACTED]` in audit, task GET, and argv redaction.
+
 
 ## Audit log and durability
 
@@ -82,8 +83,8 @@ intent. The same lifecycle is committed atomically to `data/tasks.db`
 (task row + audit outbox row in one transaction), SQLite WAL +
 `synchronous=FULL`, verified read-write at startup (fail-closed).
 
-Lifecycle per call: `accepted`, then `approved`/`denied` for gated verbs,
-then `executing` → result; failures retry with capped exponential
+Lifecycle per call: `accepted`, then `executing` → result (or `pending`
+when the worker owns first exec). Failures retry with capped exponential
 backoff, repeated failures trip the per-verb circuit breaker, and
 exhaustion fires a `termux-notification`. A full queue rejects with
 `503 queue_full` (check + insert are atomic, so floods can't overfill).
@@ -99,11 +100,9 @@ the same key is rejected with `409 idempotency_conflict`.
     -data-dir    base dir for .agent-token, logs/, data/ (default ".")
     -catalog     path to verbs.yaml (default ./verbs.yaml)
     -token-file  agent token path (default <data-dir>/.agent-token)
-    -policy-file approval-policy.json path (default none)
     -audit-log   NDJSON audit path (default <data-dir>/logs/audit.log)
     -db          SQLite tasks db (default <data-dir>/data/tasks.db)
-    -sync-exec   run first attempt inline after approval (debug; default: worker)
-    -unattended  remote-agent full autonomy (see below; also DISPATCHER_UNATTENDED=1)
+    -sync-exec   run first attempt inline (debug; default: worker)
     -validate    load and check verbs.yaml, then exit
     -version     print version and exit
 
@@ -114,9 +113,6 @@ the same key is rejected with `409 idempotency_conflict`.
 - `401 unauthorized` — wrong/missing `X-Agent-Token`; re-read
   `~/dispatcher-go/.agent-token` (no trailing newline issues: use
   `$(cat ...)` unquoted only inside the header string as shown).
-- Confirm dialog never appears — device must be unlocked the first time;
-  the Termux:API app must be installed or `termux-dialog` times out to
-  deny after 120s.
 - Verb fails with `executable file not found in $PATH` — the `termux-api`
   package isn't installed (`pkg install termux-api`) or the Termux:API
   app is missing.
@@ -166,16 +162,9 @@ to run — it never serves to bare address-holders.
 `scripts/tailcat-forward.sh` wraps this with a `ping --until-direct`
 pre-check and reconnect backoff: `tailcat-forward.sh <tc-addr>`.
 
-**Full autonomy posture.** Remote agents get no dialog taps, so the
-phone runs global `always-approve` (`{"approval_mode":
-"always-approve"}` policy file) **plus** `-unattended`
-(`DISPATCHER_UNATTENDED=1` also works). Either alone changes nothing
-for high-risk verbs; together, per-verb `ask` and `force_ask` gates are
-overridden to approve. Every bypassed approval audits
-`unattended:true`, and `/v1/health` reports
-`approval.unattended` — check it remotely to
-confirm the posture you think is running. Without `-unattended`, gated
-verbs time out to denied when no human is present.
+**Autonomy.** The daemon executes every catalog verb without a human
+confirm gate. Possession of `X-Agent-Token` is full device-capability
+access for verbs in `verbs.yaml`. `/v1/health` reports `"autonomy":"full"`.
 
 **Caveats.** tailcat has no CLI/wire stability promises — the release
 pins v0.5.0. Public DERP relays are rate-limited and metadata-logged
