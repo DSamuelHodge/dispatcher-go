@@ -200,7 +200,10 @@ func TestSMSSendDeniedNoRetry(t *testing.T) {
 	// GET task must not contain secret
 	greq, _ := http.NewRequest(http.MethodGet, base+"/v1/tasks/"+out.TaskID, nil)
 	greq.Header.Set(auth.Header, s.Token.String())
-	gres, _ := http.DefaultClient.Do(greq)
+	gres, err := http.DefaultClient.Do(greq)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer gres.Body.Close()
 	gbody, _ := io.ReadAll(gres.Body)
 	if strings.Contains(string(gbody), secret) {
@@ -247,7 +250,10 @@ func TestSMSSendApproved(t *testing.T) {
 	}
 	greq, _ := http.NewRequest(http.MethodGet, base+"/v1/tasks/"+out.TaskID, nil)
 	greq.Header.Set(auth.Header, s.Token.String())
-	gres, _ := http.DefaultClient.Do(greq)
+	gres, err := http.DefaultClient.Do(greq)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer gres.Body.Close()
 	gbody, _ := io.ReadAll(gres.Body)
 	if strings.Contains(string(gbody), secret) {
@@ -264,7 +270,10 @@ func TestClipboardRedaction(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, base+"/v1/verbs/clipboard.set", bytes.NewReader(b))
 	req.Header.Set(auth.Header, s.Token.String())
 	req.Header.Set("Content-Type", "application/json")
-	res, _ := http.DefaultClient.Do(req)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer res.Body.Close()
 	raw, _ := io.ReadAll(res.Body)
 	if log.Contains(secret) {
@@ -276,7 +285,10 @@ func TestClipboardRedaction(t *testing.T) {
 	_ = json.Unmarshal(raw, &out)
 	greq, _ := http.NewRequest(http.MethodGet, base+"/v1/tasks/"+out.TaskID, nil)
 	greq.Header.Set(auth.Header, s.Token.String())
-	gres, _ := http.DefaultClient.Do(greq)
+	gres, err := http.DefaultClient.Do(greq)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer gres.Body.Close()
 	gbody, _ := io.ReadAll(gres.Body)
 	if strings.Contains(string(gbody), secret) {
@@ -292,7 +304,10 @@ func TestForceAskBeatsPolicyAlways(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, base+"/v1/verbs/sms.send", bytes.NewReader(b))
 	req.Header.Set(auth.Header, s.Token.String())
 	req.Header.Set("Content-Type", "application/json")
-	res, _ := http.DefaultClient.Do(req)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer res.Body.Close()
 	raw, _ := io.ReadAll(res.Body)
 	var out struct {
@@ -423,7 +438,10 @@ func TestStreamLifecycle(t *testing.T) {
 	}
 	dreq, _ := http.NewRequest(http.MethodDelete, base+"/v1/streams/"+out.StreamID, nil)
 	dreq.Header.Set(auth.Header, s.Token.String())
-	dres, _ := http.DefaultClient.Do(dreq)
+	dres, err := http.DefaultClient.Do(dreq)
+	if err != nil {
+		t.Fatal(err)
+	}
 	dres.Body.Close()
 	if dres.StatusCode != http.StatusOK {
 		t.Fatalf("delete %d", dres.StatusCode)
@@ -431,7 +449,10 @@ func TestStreamLifecycle(t *testing.T) {
 	// 404 after delete
 	greq, _ := http.NewRequest(http.MethodGet, base+"/v1/streams/"+out.StreamID, nil)
 	greq.Header.Set(auth.Header, s.Token.String())
-	gres, _ := http.DefaultClient.Do(greq)
+	gres, err := http.DefaultClient.Do(greq)
+	if err != nil {
+		t.Fatal(err)
+	}
 	gres.Body.Close()
 	if gres.StatusCode != http.StatusNotFound {
 		t.Fatalf("want 404 got %d", gres.StatusCode)

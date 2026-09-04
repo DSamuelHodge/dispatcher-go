@@ -127,6 +127,7 @@ func run(args []string) int {
 	circuits := circuit.NewRegistry(cat.Daemon.CBTripThreshold, time.Duration(cat.Daemon.CBOpenS)*time.Second)
 
 	srv := api.New(cat, tok, store)
+	srv.Version = Version
 	srv.Policy = policy
 	srv.PolicyPath = polFile
 	srv.Audit = alog

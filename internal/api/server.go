@@ -35,12 +35,15 @@ type Server struct {
 	// PolicyPath is the runtime approval-policy.json location, surfaced in
 	// /v1/health when set.
 	PolicyPath string
-	Prompter   approve.Prompter
-	Audit      *audit.Logger
-	Circuits   *circuit.Registry
-	Streams    *streams.Registry
-	Resume     queue.ResumeStats
-	StartedAt  time.Time
+	// Version is the daemon build version, surfaced in /v1/health.
+	// Set from main.Version; empty means a dev build.
+	Version   string
+	Prompter  approve.Prompter
+	Audit     *audit.Logger
+	Circuits  *circuit.Registry
+	Streams   *streams.Registry
+	Resume    queue.ResumeStats
+	StartedAt time.Time
 	// Notifier delivers exhaustion alerts (defaults to Termux).
 	Notifier notify.Notifier
 	// SyncExec runs approval+first-exec inline (tests / simple mode).
@@ -189,6 +192,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			cb[k] = v
 		}
 	}
+	ver := s.Version
+	if ver == "" {
+		ver = "dev"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"mode":        s.effectiveMode(),
 		"approval":    s.approvalSummary(),
@@ -196,7 +203,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"cb_states":   cb,
 		"resume":      s.Resume,
 		"uptime_s":    int(time.Since(s.StartedAt).Seconds()),
-		"version":     "m6",
+		"version":     ver,
 	})
 }
 
@@ -758,35 +765,80 @@ func (s *Server) handleDeleteStream(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"stream_id": id, "status": "closed"})
 }
 
+// solePlaceholder reports whether tok is exactly one {{.name}} template
+// with no surrounding literal text.
+func solePlaceholder(tok string) (string, bool) {
+	if !strings.HasPrefix(tok, "{{.") || !strings.HasSuffix(tok, "}}") {
+		return "", false
+	}
+	name := tok[len("{{.") : len(tok)-len("}}")]
+	if name == "" || strings.ContainsAny(name, "./{} ") {
+		return "", false
+	}
+	return name, true
+}
+
 func expandArgv(v verbs.Verb, args map[string]any, stdin string) (argv, redacted []string, err error) {
+	specs := make(map[string]verbs.ArgSpec, len(v.Args))
 	for _, a := range v.Args {
-		if !a.Required {
+		specs[a.Name] = a
+		if a.Required {
+			if _, ok := args[a.Name]; !ok {
+				return nil, nil, fmt.Errorf("missing required arg %q", a.Name)
+			}
+		}
+	}
+	type expanded struct {
+		raw    string
+		out    string
+		isTmpl bool
+		fields []string
+	}
+	ex := make([]expanded, len(v.Argv))
+	for i, tok := range v.Argv {
+		out, isTmpl, fields := subst(tok, args)
+		ex[i] = expanded{raw: tok, out: out, isTmpl: isTmpl, fields: fields}
+	}
+	// Omit empty non-required flag+value pairs: a token that is exactly
+	// {{.name}} rendering "" drops itself, plus its declared flag token
+	// when the preceding token is that flag verbatim.
+	drop := make([]bool, len(ex))
+	for i, e := range ex {
+		name, ok := solePlaceholder(e.raw)
+		if !ok || e.out != "" {
 			continue
 		}
-		if _, ok := args[a.Name]; !ok {
-			return nil, nil, fmt.Errorf("missing required arg %q", a.Name)
+		spec, known := specs[name]
+		if !known || spec.Required {
+			continue
+		}
+		drop[i] = true
+		if i > 0 && !drop[i-1] && spec.Flag != "" && !ex[i-1].isTmpl && ex[i-1].raw == spec.Flag {
+			drop[i-1] = true
 		}
 	}
 	secrets := approve.SecretFields(v)
-	argv = make([]string, len(v.Argv))
-	redacted = make([]string, len(v.Argv))
-	for i, tok := range v.Argv {
-		out, isTmpl, fields := subst(tok, args)
-		argv[i] = out
-		redacted[i] = out
-		if isTmpl {
+	for i, e := range ex {
+		if drop[i] {
+			continue
+		}
+		out := e.out
+		red := out
+		if e.isTmpl {
 			// Every placeholder in the token must be checked, not just
 			// the last: "{{.a}}-{{.b}}" with either secret redacts.
-			for _, name := range fields {
+			for _, name := range e.fields {
 				if _, sec := secrets[name]; sec {
-					redacted[i] = approve.RedactedMarker
+					red = approve.RedactedMarker
 					break
 				}
 			}
 		}
-		if stdin != "" && strings.Contains(argv[i], stdin) {
-			redacted[i] = approve.RedactedMarker
+		if stdin != "" && strings.Contains(out, stdin) {
+			red = approve.RedactedMarker
 		}
+		argv = append(argv, out)
+		redacted = append(redacted, red)
 	}
 	return argv, redacted, nil
 }
