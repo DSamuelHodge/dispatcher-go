@@ -246,6 +246,61 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
 	return cloneTask(t), nil
 }
 
+// CreateAndAuditLimited is CreateAndAudit with the capacity check inside the
+// same transaction: COUNT of active-state rows, abort with ErrQueueFull when
+// already at maxDepth, else insert task + outbox row atomically.
+func (s *SQLite) CreateAndAuditLimited(in CreateInput, ev audit.Event, maxDepth int) (*Task, error) {
+	now := nowUTC()
+	t := &Task{
+		ID:           newID(),
+		Verb:         in.Verb,
+		ArgsJSON:     in.ArgsJSON,
+		ArgvJSON:     encodeArgv(in.Argv),
+		ArgvRedacted: append([]string(nil), in.ArgvRedacted...),
+		StdinPresent: in.Stdin != "",
+		StdinBlob:    in.Stdin,
+		State:        StateAccepted,
+		Attempt:      0,
+		MaxRetries:   in.MaxRetries,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	argvR, _ := json.Marshal(t.ArgvRedacted)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	// Capacity check inside the write transaction. With MaxOpenConns(1) and
+	// BEGIN IMMEDIATE semantics from modernc sqlite, concurrent writers
+	// serialize here: the count reflects all committed inserts.
+	var depth int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM tasks WHERE state IN (?,?,?,?,?)`,
+		StatePending, StateRetryScheduled, StatePendingApproval, StateExecuting, StateAccepted,
+	).Scan(&depth); err != nil {
+		return nil, err
+	}
+	if depth >= maxDepth {
+		return nil, ErrQueueFull
+	}
+	if _, err := tx.Exec(`
+INSERT INTO tasks(id, verb, args_json, argv_json, argv_redacted, stdin_blob, stdin_present,
+  state, attempt, max_retries, created_at, updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		t.ID, t.Verb, t.ArgsJSON, t.ArgvJSON, string(argvR), t.StdinBlob, boolInt(t.StdinPresent),
+		t.State, t.Attempt, t.MaxRetries, fmtTime(t.CreatedAt), fmtTime(t.UpdatedAt),
+	); err != nil {
+		return nil, err
+	}
+	if _, _, _, err := insertAuditTx(tx, withTaskDefaults(ev, t.ID)); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return cloneTask(t), nil
+}
+
 // UpdateAndAudit applies fn and appends the audit event in one transaction.
 func (s *SQLite) UpdateAndAudit(id string, fn func(*Task), ev audit.Event) error {
 	tx, err := s.db.Begin()

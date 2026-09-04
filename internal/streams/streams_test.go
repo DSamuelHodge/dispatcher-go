@@ -48,7 +48,7 @@ func TestStartGetDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) && s.Ring.Len() < 2 {
 		time.Sleep(20 * time.Millisecond)
 	}

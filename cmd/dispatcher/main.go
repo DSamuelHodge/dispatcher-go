@@ -128,6 +128,7 @@ func run(args []string) int {
 
 	srv := api.New(cat, tok, store)
 	srv.Policy = policy
+	srv.PolicyPath = polFile
 	srv.Audit = alog
 	srv.Prompter = approve.DialogPrompter{}
 	srv.SyncExec = *syncExec

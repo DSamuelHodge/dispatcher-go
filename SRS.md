@@ -84,7 +84,14 @@ Task states (normative): spec §9.1 — `accepted`, `pending_approval`, `approve
 - FR-2.4 Streams: `POST /v1/streams {verb, args}` → `{stream_id}`; `GET /v1/streams/{id}?since=`;
   `DELETE /v1/streams/{id}` (kill proc, free buffer, audit entry). Unknown/closed id → 404.
 - FR-2.5 `GET /v1/verbs` (effective catalog), `GET /v1/health`
-  `{mode, queue_depth, cb_states, uptime}`.
+  `{mode, approval{daemon_mode, policy_mode, effective_global, backend, policy_path,
+  force_ask_verbs, per_verb_ask, per_verb_always}, queue_depth, cb_states, resume, uptime}`.
+  There is no single "effective mode for all verbs": force_ask verbs still gate under
+  global always-approve; per-verb resolution is authoritative.
+- FR-2.6 Queue capacity is enforced atomically inside the store
+  (`CreateAndAuditLimited`): capacity check + task insert + audit outbox commit in one
+  transaction/lock; concurrent callers that lose the race receive `503 queue_full` and
+  depth never exceeds `max_queue_depth`.
 
 ### FR-3 Auth
 

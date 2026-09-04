@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/DSamuelHodge/dispatcher-go/internal/audit"
@@ -62,6 +63,10 @@ type IdempotencyRecord struct {
 	CreatedAt   time.Time
 }
 
+// ErrQueueFull is returned when a capacity-limited create finds the queue
+// at max depth. Errors.Is-compatible sentinel; map to HTTP 503 queue_full.
+var ErrQueueFull = errors.New("queue_full")
+
 // CreateInput is the payload for inserting a new task.
 type CreateInput struct {
 	Verb         string
@@ -87,6 +92,10 @@ type Store interface {
 	AppendAudit(ev audit.Event) error
 	// CreateAndAudit inserts a task and its audit event atomically (ADR-0002).
 	CreateAndAudit(in CreateInput, ev audit.Event) (*Task, error)
+	// CreateAndAuditLimited is CreateAndAudit with a capacity check inside the
+	// same transaction/lock: returns ErrQueueFull (and creates nothing) when
+	// active-depth already >= maxDepth. This closes the check-then-create race.
+	CreateAndAuditLimited(in CreateInput, ev audit.Event, maxDepth int) (*Task, error)
 	// UpdateAndAudit applies fn and appends the audit event atomically (ADR-0002).
 	UpdateAndAudit(id string, fn func(*Task), ev audit.Event) error
 	// FindIdempotency looks up a client idempotency key (ADR-0003).

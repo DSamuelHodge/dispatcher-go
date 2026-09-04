@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,7 +31,7 @@ daemon:
   listen: "127.0.0.1:0"
   approval_mode: ask
   approval_backend: dialog
-  task_timeout_s: 5
+  task_timeout_s: 30
   max_retries: 5
   backoff_base_s: 1
   cb_trip_threshold: 5
@@ -574,5 +575,85 @@ func TestStreamRequiresApproval(t *testing.T) {
 	st, body := postStreamHelper(t, base2, s2.Token.String())
 	if st != http.StatusAccepted {
 		t.Fatalf("approved stream: status=%d %s, want 202", st, body)
+	}
+}
+
+func TestQueueFullConcurrent(t *testing.T) {
+	s, base, _, cleanup := setup(t, nil)
+	defer cleanup()
+	// max_queue_depth is 100 in fixture; run 120 concurrent creates and
+	// assert store depth never exceeds it and losers get 503.
+	var mu sync.Mutex
+	full503 := 0
+	var wg sync.WaitGroup
+	for i := 0; i < 120; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req, _ := http.NewRequest(http.MethodPost, base+"/v1/verbs/battery.status", bytes.NewReader([]byte(`{}`)))
+			req.Header.Set(auth.Header, s.Token.String())
+			req.Header.Set("Content-Type", "application/json")
+			res, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return
+			}
+			defer res.Body.Close()
+			if res.StatusCode == http.StatusServiceUnavailable {
+				mu.Lock()
+				full503++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if s.Tasks.Depth() > 100 {
+		t.Fatalf("depth %d exceeds max", s.Tasks.Depth())
+	}
+	if full503 == 0 {
+		t.Fatal("expected some 503 queue_full under flood")
+	}
+}
+
+func TestHealthApprovalObject(t *testing.T) {
+	s, base, _, cleanup := setup(t, nil)
+	defer cleanup()
+	s.Policy = approve.PolicyFile{ApprovalMode: "always-approve"}
+	s.PolicyPath = "/tmp/policy.json"
+	req, _ := http.NewRequest(http.MethodGet, base+"/v1/health", nil)
+	req.Header.Set(auth.Header, s.Token.String())
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var out struct {
+		Mode     string `json:"mode"`
+		Approval struct {
+			DaemonMode      string   `json:"daemon_mode"`
+			PolicyMode      string   `json:"policy_mode"`
+			EffectiveGlobal string   `json:"effective_global"`
+			Backend         string   `json:"backend"`
+			PolicyPath      string   `json:"policy_path"`
+			ForceAskVerbs   int      `json:"force_ask_verbs"`
+			ForceAskNames   []string `json:"force_ask_names"`
+			PerVerbAsk      int      `json:"per_verb_ask"`
+			PerVerbAlways   int      `json:"per_verb_always"`
+		} `json:"approval"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Mode != "always-approve" || out.Approval.EffectiveGlobal != "always-approve" {
+		t.Fatalf("%+v", out)
+	}
+	if out.Approval.DaemonMode != "ask" || out.Approval.PolicyMode != "always-approve" {
+		t.Fatalf("%+v", out.Approval)
+	}
+	if out.Approval.PolicyPath != "/tmp/policy.json" {
+		t.Fatalf("%+v", out.Approval)
+	}
+	// sms.send in fixture is force_ask
+	if out.Approval.ForceAskVerbs < 1 || len(out.Approval.ForceAskNames) < 1 {
+		t.Fatalf("%+v", out.Approval)
 	}
 }

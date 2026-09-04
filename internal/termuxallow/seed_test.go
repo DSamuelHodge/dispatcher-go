@@ -14,8 +14,14 @@ func TestRepoSeedCatalogLoads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cat.ByName) < 20 {
+	if len(cat.ByName) < 70 {
 		t.Fatalf("seed too small: %d", len(cat.ByName))
+	}
+	// New coverage verbs (M8)
+	for _, want := range []string{"sensor.read", "saf.read", "wifi.enable", "keystore.sign", "nfc.write", "dialog.confirm", "job.schedule", "stt.listen", "storage.get", "notification.channel"} {
+		if _, ok := cat.ByName[want]; !ok {
+			t.Errorf("missing verb %s", want)
+		}
 	}
 	for name, v := range cat.ByName {
 		if err := termuxallow.ValidateArgv(v.Argv); err != nil {

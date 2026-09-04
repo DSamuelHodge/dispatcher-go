@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -27,16 +28,19 @@ import (
 
 // Server serves the /v1 API.
 type Server struct {
-	Catalog   *verbs.Catalog
-	Token     *auth.Token
-	Tasks     queue.Store
-	Policy    approve.PolicyFile
-	Prompter  approve.Prompter
-	Audit     *audit.Logger
-	Circuits  *circuit.Registry
-	Streams   *streams.Registry
-	Resume    queue.ResumeStats
-	StartedAt time.Time
+	Catalog *verbs.Catalog
+	Token   *auth.Token
+	Tasks   queue.Store
+	Policy  approve.PolicyFile
+	// PolicyPath is the runtime approval-policy.json location, surfaced in
+	// /v1/health when set.
+	PolicyPath string
+	Prompter   approve.Prompter
+	Audit      *audit.Logger
+	Circuits   *circuit.Registry
+	Streams    *streams.Registry
+	Resume     queue.ResumeStats
+	StartedAt  time.Time
 	// Notifier delivers exhaustion alerts (defaults to Termux).
 	Notifier notify.Notifier
 	// SyncExec runs approval+first-exec inline (tests / simple mode).
@@ -135,6 +139,49 @@ func (s *Server) effectiveMode() string {
 	return string(s.Catalog.Daemon.ApprovalMode)
 }
 
+// approvalSummary aggregates gate-relevant fields for /v1/health.
+// There is intentionally no single "effective mode for all verbs":
+// force_ask_even_if_global_auto verbs still prompt under a global
+// always-approve, so only per-verb resolution is authoritative.
+func (s *Server) approvalSummary() map[string]any {
+	daemonMode := strings.TrimSpace(string(s.Catalog.Daemon.ApprovalMode))
+	policyMode := strings.TrimSpace(s.Policy.ApprovalMode)
+	effective := daemonMode
+	if policyMode != "" {
+		effective = policyMode
+	}
+	forceAsk, perVerbAsk, perVerbAlways := 0, 0, 0
+	var forceAskNames []string
+	for _, name := range s.Catalog.Order {
+		v := s.Catalog.ByName[name]
+		if v.ForceAskEvenIfGlobalAuto {
+			forceAsk++
+			forceAskNames = append(forceAskNames, name)
+		}
+		switch v.Approval {
+		case verbs.ApprovalAsk:
+			perVerbAsk++
+		case verbs.ApprovalAlwaysApprove:
+			perVerbAlways++
+		}
+	}
+	out := map[string]any{
+		"daemon_mode":      daemonMode,
+		"policy_mode":      policyMode, // empty when no policy-file override
+		"effective_global": effective,
+		"backend":          string(s.Catalog.Daemon.ApprovalBackend),
+		"force_ask_verbs":  forceAsk,
+		"force_ask_names":  forceAskNames,
+		"per_verb_ask":     perVerbAsk,
+		"per_verb_always":  perVerbAlways,
+		"prompt_timeout_s": 120,
+	}
+	if s.PolicyPath != "" {
+		out["policy_path"] = s.PolicyPath
+	}
+	return out
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	cb := map[string]any{}
 	if s.Circuits != nil {
@@ -144,6 +191,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"mode":        s.effectiveMode(),
+		"approval":    s.approvalSummary(),
 		"queue_depth": s.Tasks.Depth(),
 		"cb_states":   cb,
 		"resume":      s.Resume,
@@ -179,10 +227,6 @@ func (s *Server) handlePostVerb(w http.ResponseWriter, r *http.Request) {
 	v, ok := s.Catalog.Get(name)
 	if !ok {
 		writeErr(w, http.StatusNotFound, "unknown_verb", fmt.Sprintf("verb %q not found", name), "")
-		return
-	}
-	if s.Tasks.Depth() >= s.Catalog.Daemon.MaxQueueDepth {
-		writeErr(w, http.StatusServiceUnavailable, "queue_full", "task queue is full", "")
 		return
 	}
 	var body postVerbBody
@@ -248,7 +292,9 @@ func (s *Server) handlePostVerb(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	task, err := s.Tasks.CreateAndAudit(queue.CreateInput{
+	// Capacity check + insert + audit happen atomically inside the store; a
+	// loser under concurrency gets ErrQueueFull and we map it to 503.
+	task, err := s.Tasks.CreateAndAuditLimited(queue.CreateInput{
 		Verb:         v.Name,
 		ArgsJSON:     string(argsJSON),
 		Argv:         argv,
@@ -258,8 +304,12 @@ func (s *Server) handlePostVerb(w http.ResponseWriter, r *http.Request) {
 	}, audit.Event{
 		Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
 		State: queue.StateAccepted, ArgvRedacted: argvRedacted, Approval: string(v.Approval),
-	})
+	}, s.Catalog.Daemon.MaxQueueDepth)
 	if err != nil {
+		if errors.Is(err, queue.ErrQueueFull) {
+			writeErr(w, http.StatusServiceUnavailable, "queue_full", "task queue is full", "")
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "store_error", err.Error(), "")
 		return
 	}

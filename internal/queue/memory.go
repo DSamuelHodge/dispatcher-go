@@ -166,6 +166,53 @@ func (m *Memory) CreateAndAudit(in CreateInput, ev audit.Event) (*Task, error) {
 	return t, nil
 }
 
+// CreateAndAuditLimited checks depth and creates under the same lock so
+// concurrent callers cannot exceed maxDepth (Memory twin of the SQLite tx).
+func (m *Memory) CreateAndAuditLimited(in CreateInput, ev audit.Event, maxDepth int) (*Task, error) {
+	m.mu.Lock()
+	depth := 0
+	for _, t := range m.tasks {
+		switch t.State {
+		case StatePending, StateRetryScheduled, StatePendingApproval, StateExecuting, StateAccepted:
+			depth++
+		}
+	}
+	if depth >= maxDepth {
+		m.mu.Unlock()
+		return nil, ErrQueueFull
+	}
+	now := nowUTC()
+	t := &Task{
+		ID:           newID(),
+		Verb:         in.Verb,
+		ArgsJSON:     in.ArgsJSON,
+		ArgvJSON:     encodeArgv(in.Argv),
+		ArgvRedacted: append([]string(nil), in.ArgvRedacted...),
+		StdinPresent: in.Stdin != "",
+		StdinBlob:    in.Stdin,
+		State:        StateAccepted,
+		Attempt:      0,
+		MaxRetries:   in.MaxRetries,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if m.tasks == nil {
+		m.tasks = make(map[string]*Task)
+	}
+	m.tasks[t.ID] = t
+	if ev.TaskID == "" {
+		ev.TaskID = t.ID
+	}
+	m.audit = append(m.audit, ev)
+	m.mu.Unlock()
+	if m.logger != nil {
+		if err := m.logger.Log(ev); err != nil {
+			return nil, err
+		}
+	}
+	return cloneTask(t), nil
+}
+
 // UpdateAndAudit applies fn and records the audit event under one lock.
 func (m *Memory) UpdateAndAudit(id string, fn func(*Task), ev audit.Event) error {
 	m.mu.Lock()

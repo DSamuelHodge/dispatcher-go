@@ -424,3 +424,336 @@ verbs:
     argv: ["termux-usb", "-l"]
     parser: text
     watch: false
+
+  # --- M8 coverage: remaining termux-api surface ---
+  - name: sensor.read
+    tier: A
+    risk: low
+    approval: inherit
+    argv: ["termux-sensor", "-s", "{{.sensor}}", "-n", "{{.count}}"]
+    args:
+      - {name: sensor, flag: -s, type: string, required: true}
+      - {name: count, flag: -n, type: int, required: false}
+    timeout_s: 60
+    parser: json
+    watch: false
+
+  - name: saf.read
+    tier: A
+    risk: low
+    approval: inherit
+    argv: ["termux-saf-read", "{{.uri}}"]
+    args:
+      - {name: uri, flag: "", type: string, required: true}
+    parser: text
+    watch: false
+
+  - name: wifi.enable
+    tier: B
+    risk: medium
+    approval: inherit
+    argv: ["termux-wifi-enable", "{{.enabled}}"]
+    args:
+      - {name: enabled, flag: "", type: string, required: true}
+    parser: exit
+    watch: false
+
+  - name: keystore.list
+    tier: B
+    risk: medium
+    approval: inherit
+    argv: ["termux-keystore", "list"]
+    parser: text
+    watch: false
+
+  - name: keystore.generate
+    tier: B
+    risk: high
+    approval: ask
+    force_ask_even_if_global_auto: true
+    argv: ["termux-keystore", "generate", "{{.alias}}", "{{.size}}"]
+    args:
+      - {name: alias, flag: "", type: string, required: true}
+      - {name: size, flag: "", type: int, required: false}
+    parser: text
+    watch: false
+
+  - name: keystore.delete
+    tier: B
+    risk: high
+    approval: ask
+    force_ask_even_if_global_auto: true
+    argv: ["termux-keystore", "delete", "{{.alias}}"]
+    args:
+      - {name: alias, flag: "", type: string, required: true}
+    parser: exit
+    watch: false
+
+  - name: keystore.sign
+    tier: B
+    risk: high
+    approval: ask
+    force_ask_even_if_global_auto: true
+    argv: ["termux-keystore", "sign", "{{.alias}}"]
+    stdin_arg: {arg: data}
+    parser: text
+    watch: false
+
+  - name: keystore.verify
+    tier: B
+    risk: medium
+    approval: inherit
+    argv: ["termux-keystore", "verify", "{{.alias}}"]
+    stdin_arg: {arg: data}
+    parser: text
+    watch: false
+
+  - name: notification.channel
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-notification-channel", "{{.op}}", "{{.name}}"]
+    args:
+      - {name: op, flag: "", type: string, required: true}
+      - {name: name, flag: "", type: string, required: false}
+    parser: exit
+    watch: false
+
+  - name: media.pause
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-media-player", "pause"]
+    parser: exit
+    watch: false
+
+  - name: media.stop
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-media-player", "stop"]
+    parser: exit
+    watch: false
+
+  - name: media.scan
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-media-scan", "{{.path}}"]
+    args:
+      - {name: path, flag: "", type: string, required: true}
+    parser: exit
+    watch: false
+
+  - name: stt.listen
+    tier: B
+    risk: medium
+    approval: inherit
+    argv: ["termux-speech-to-text"]
+    timeout_s: 120
+    parser: json
+    watch: false
+
+  - name: storage.get
+    tier: B
+    risk: medium
+    approval: inherit
+    argv: ["termux-storage-get", "-f", "{{.file}}"]
+    args:
+      - {name: file, flag: -f, type: string, required: false}
+    timeout_s: 300
+    parser: exit
+    watch: false
+
+  - name: saf.create
+    tier: B
+    risk: medium
+    approval: inherit
+    argv: ["termux-saf-create", "{{.name}}"]
+    args:
+      - {name: name, flag: "", type: string, required: true}
+    parser: text
+    watch: false
+
+  - name: saf.write
+    tier: B
+    risk: medium
+    approval: inherit
+    argv: ["termux-saf-write", "{{.uri}}"]
+    stdin_arg: {arg: content}
+    parser: exit
+    watch: false
+
+  - name: saf.rm
+    tier: B
+    risk: medium
+    approval: inherit
+    argv: ["termux-saf-rm", "{{.uri}}"]
+    args:
+      - {name: uri, flag: "", type: string, required: true}
+    parser: exit
+    watch: false
+
+  - name: saf.mkdir
+    tier: B
+    risk: medium
+    approval: inherit
+    argv: ["termux-saf-mkdir", "{{.name}}"]
+    args:
+      - {name: name, flag: "", type: string, required: true}
+    parser: text
+    watch: false
+
+  - name: saf.managedir
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-saf-managedir"]
+    parser: text
+    watch: false
+
+  - name: job.schedule
+    tier: B
+    risk: medium
+    approval: inherit
+    argv: ["termux-job-scheduler", "-j", "{{.job_id}}", "--period-ms", "{{.period_ms}}", "-s"]
+    args:
+      - {name: job_id, flag: -j, type: string, required: true}
+      - {name: period_ms, flag: -p, type: int, required: true}
+    parser: exit
+    watch: false
+
+  - name: job.cancel
+    tier: B
+    risk: medium
+    approval: inherit
+    argv: ["termux-job-scheduler", "--cancel", "-j", "{{.job_id}}"]
+    args:
+      - {name: job_id, flag: -j, type: string, required: true}
+    parser: exit
+    watch: false
+
+  - name: nfc.write
+    tier: B
+    risk: high
+    approval: ask
+    force_ask_even_if_global_auto: true
+    argv: ["termux-nfc", "-w"]
+    stdin_arg: {arg: payload}
+    parser: json
+    watch: false
+
+  # --- dialog widgets: approval primitive, never gated ---
+  - name: dialog.confirm
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-dialog", "confirm", "-t", "{{.title}}"]
+    args:
+      - {name: title, flag: -t, type: string, required: false}
+    timeout_s: 120
+    parser: json
+    watch: false
+
+  - name: dialog.text
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-dialog", "text", "-t", "{{.title}}"]
+    args:
+      - {name: title, flag: -t, type: string, required: false}
+    timeout_s: 120
+    parser: json
+    watch: false
+
+  - name: dialog.checkbox
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-dialog", "checkbox", "-t", "{{.title}}", "-v", "{{.values}}"]
+    args:
+      - {name: title, flag: -t, type: string, required: false}
+      - {name: values, flag: -v, type: string, required: false}
+    timeout_s: 120
+    parser: json
+    watch: false
+
+  - name: dialog.counter
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-dialog", "counter", "-t", "{{.title}}"]
+    args:
+      - {name: title, flag: -t, type: string, required: false}
+    timeout_s: 120
+    parser: json
+    watch: false
+
+  - name: dialog.date
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-dialog", "date", "-t", "{{.title}}"]
+    args:
+      - {name: title, flag: -t, type: string, required: false}
+    timeout_s: 120
+    parser: json
+    watch: false
+
+  - name: dialog.radio
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-dialog", "radio", "-t", "{{.title}}", "-v", "{{.values}}"]
+    args:
+      - {name: title, flag: -t, type: string, required: false}
+      - {name: values, flag: -v, type: string, required: false}
+    timeout_s: 120
+    parser: json
+    watch: false
+
+  - name: dialog.sheet
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-dialog", "sheet", "-t", "{{.title}}", "-v", "{{.values}}"]
+    args:
+      - {name: title, flag: -t, type: string, required: false}
+      - {name: values, flag: -v, type: string, required: false}
+    timeout_s: 120
+    parser: json
+    watch: false
+
+  - name: dialog.spinner
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-dialog", "spinner", "-t", "{{.title}}", "-v", "{{.values}}"]
+    args:
+      - {name: title, flag: -t, type: string, required: false}
+      - {name: values, flag: -v, type: string, required: false}
+    timeout_s: 120
+    parser: json
+    watch: false
+
+  - name: dialog.speech
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-dialog", "speech", "-t", "{{.title}}"]
+    args:
+      - {name: title, flag: -t, type: string, required: false}
+    timeout_s: 120
+    parser: json
+    watch: false
+
+  - name: dialog.time
+    tier: B
+    risk: low
+    approval: inherit
+    argv: ["termux-dialog", "time", "-t", "{{.title}}"]
+    args:
+      - {name: title, flag: -t, type: string, required: false}
+    timeout_s: 120
+    parser: json
+    watch: false

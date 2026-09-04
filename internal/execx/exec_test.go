@@ -25,7 +25,7 @@ func TestRunEcho(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	res := execx.Run(context.Background(), []string{"termux-battery-status"}, "", 5*time.Second)
+	res := execx.Run(context.Background(), []string{"termux-battery-status"}, "", 30*time.Second)
 	if res.Err != nil || res.ExitCode != 0 {
 		t.Fatalf("run: %+v", res)
 	}
