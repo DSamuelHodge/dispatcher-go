@@ -42,6 +42,7 @@ func run(args []string) int {
 	auditPath := fs.String("audit-log", "", "NDJSON audit log path (default: <data-dir>/logs/audit.log)")
 	dbPath := fs.String("db", "", "SQLite tasks db (default: <data-dir>/data/tasks.db)")
 	syncExec := fs.Bool("sync-exec", false, "run first attempt inline after approval (debug); default uses worker")
+	unattended := fs.Bool("unattended", os.Getenv("DISPATCHER_UNATTENDED") == "1", "remote-agent full autonomy: explicit global always-approve becomes absolute, overriding per-verb ask and force_ask gates (audited + in /v1/health)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -128,6 +129,10 @@ func run(args []string) int {
 
 	srv := api.New(cat, tok, store)
 	srv.Version = Version
+	srv.Unattended = *unattended
+	if *unattended {
+		fmt.Fprintf(os.Stderr, "dispatcher: WARNING: unattended mode ON — force_ask verbs auto-approve under global always-approve (no human gate)\n")
+	}
 	srv.Policy = policy
 	srv.PolicyPath = polFile
 	srv.Audit = alog

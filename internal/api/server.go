@@ -49,6 +49,12 @@ type Server struct {
 	// SyncExec runs approval+first-exec inline (tests / simple mode).
 	// When false, after approval the task is left pending for the worker.
 	SyncExec bool
+	// Unattended enables the remote-agent full-autonomy escape hatch: an
+	// explicit global always-approve becomes absolute, overriding per-verb
+	// ask and force_ask gates (see approve.ResolveUnattended). Without
+	// global always-approve it changes nothing. Surfaced in /v1/health
+	// and audited on every bypassed approval.
+	Unattended bool
 }
 
 // New constructs a server with dialog prompter by default.
@@ -178,6 +184,10 @@ func (s *Server) approvalSummary() map[string]any {
 		"per_verb_ask":     perVerbAsk,
 		"per_verb_always":  perVerbAlways,
 		"prompt_timeout_s": 120,
+		// unattended (-unattended flag) lets global always-approve cover
+		// force_ask verbs: remote-agent full autonomy, no human gate.
+		"unattended":           s.Unattended,
+		"unattended_high_risk": s.Unattended,
 	}
 	if s.PolicyPath != "" {
 		out["policy_path"] = s.PolicyPath
@@ -393,7 +403,7 @@ func idempotencyHash(verb string, args map[string]any, stdin string) string {
 }
 
 func (s *Server) runPipeline(ctx context.Context, id string, v verbs.Verb, br *circuit.Breaker, argv, argvRedacted []string, stdin string) {
-	dec := approve.Resolve(v, s.Catalog.Daemon, s.Policy)
+	dec := approve.ResolveUnattended(v, s.Catalog.Daemon, s.Policy, s.Unattended)
 	_ = s.Tasks.Update(id, func(t *queue.Task) {
 		t.ApprovalMode = string(dec.Mode)
 	})
@@ -445,6 +455,7 @@ func (s *Server) runPipeline(ctx context.Context, id string, v verbs.Verb, br *c
 		}, audit.Event{
 			TaskID: id, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
 			State: "approved", ApprovedBy: dec.By, ArgvRedacted: argvRedacted, Approval: string(dec.Mode),
+			Unattended: dec.Unattended,
 		})
 	}
 
@@ -666,7 +677,7 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 	}
 	// P0: streams are Tier B watch verbs — they pass the same approval
 	// gate as one-shot verbs, not around it.
-	approval := approve.Resolve(v, s.Catalog.Daemon, s.Policy)
+	approval := approve.ResolveUnattended(v, s.Catalog.Daemon, s.Policy, s.Unattended)
 	approvedBy := approval.By
 	if approval.NeedsPrompt {
 		prompter := s.Prompter
@@ -714,6 +725,7 @@ func (s *Server) handlePostStream(w http.ResponseWriter, r *http.Request) {
 		TaskID: st.ID, Verb: v.Name, Tier: string(v.Tier), Risk: string(v.Risk),
 		State: "stream_open", ArgvRedacted: argvRedacted,
 		Approval: string(approval.Mode), ApprovedBy: approvedBy,
+		Unattended: approval.Unattended,
 	})
 	_, _ = s.Tasks.DrainOutbox(s.Audit, 20)
 	writeJSON(w, http.StatusAccepted, map[string]any{"stream_id": st.ID, "verb": st.Verb})

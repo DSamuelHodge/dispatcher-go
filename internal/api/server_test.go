@@ -678,3 +678,59 @@ func TestHealthApprovalObject(t *testing.T) {
 		t.Fatalf("%+v", out.Approval)
 	}
 }
+
+func TestUnattendedBypassesForceAskEndToEnd(t *testing.T) {
+	// StaticPrompter refuses everything: without -unattended this would be
+	// denied; with it, sms.send (force_ask) auto-approves under global
+	// always-approve and the audit row carries unattended:true.
+	s, base, log, cleanup := setup(t, approve.StaticPrompter{Approve: false})
+	defer cleanup()
+	s.Unattended = true
+	s.Policy = approve.PolicyFile{ApprovalMode: "always-approve"}
+	b, _ := json.Marshal(map[string]any{
+		"args":  map[string]any{"number": "+15551234567"},
+		"stdin": "hello",
+	})
+	req, _ := http.NewRequest(http.MethodPost, base+"/v1/verbs/sms.send", bytes.NewReader(b))
+	req.Header.Set(auth.Header, s.Token.String())
+	req.Header.Set("Content-Type", "application/json")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	raw, _ := io.ReadAll(res.Body)
+	var out struct {
+		Status string `json:"status"`
+	}
+	_ = json.Unmarshal(raw, &out)
+	if out.Status == "denied" {
+		t.Fatalf("unattended force_ask was denied: %s", raw)
+	}
+	if !log.Contains(`"unattended":true`) {
+		t.Fatal("expected unattended:true in audit")
+	}
+}
+
+func TestHealthReportsUnattended(t *testing.T) {
+	s, base, _, cleanup := setup(t, nil)
+	defer cleanup()
+	s.Unattended = true
+	req, _ := http.NewRequest(http.MethodGet, base+"/v1/health", nil)
+	req.Header.Set(auth.Header, s.Token.String())
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	raw, _ := io.ReadAll(res.Body)
+	var out struct {
+		Approval map[string]any `json:"approval"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Approval["unattended"] != true || out.Approval["unattended_high_risk"] != true {
+		t.Fatalf("health missing unattended flags: %s", raw)
+	}
+}

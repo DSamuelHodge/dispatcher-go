@@ -25,6 +25,9 @@ type Event struct {
 	LatencyMS    int64    `json:"latency_ms,omitempty"`
 	Attempt      int      `json:"attempt,omitempty"`
 	Error        string   `json:"error,omitempty"`
+	// Unattended marks approvals granted by the -unattended force_ask
+	// override (remote-agent full autonomy). Only set on approved events.
+	Unattended bool `json:"unattended,omitempty"`
 }
 
 // maxMemEvents bounds the in-memory ring used by Mem/Contains (test and

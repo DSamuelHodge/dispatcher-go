@@ -64,6 +64,37 @@ type Decision struct {
 	By string
 	// Reason is a short debug string (not secret).
 	Reason string
+	// Unattended is true only when the -unattended override bypassed a
+	// force_ask gate (see ResolveUnattended). Audited on approval.
+	Unattended bool
+}
+
+// ResolveUnattended behaves like Resolve, except when unattended is true
+// AND the effective global mode (policy file, else daemon) is
+// always-approve: any gate that would otherwise prompt — force_ask or
+// per-verb ask — is overridden to approve. This is the remote-agent
+// full-autonomy escape hatch (-unattended flag): it makes an explicit
+// global always-approve absolute. Without global always-approve,
+// unattended changes nothing (gates still prompt and time out to denied
+// without a human). Decision.Unattended is true exactly when a prompt
+// was bypassed, so callers can audit it loudly.
+func ResolveUnattended(v verbs.Verb, daemon config.Daemon, policy PolicyFile, unattended bool) Decision {
+	plain := Resolve(v, daemon, policy)
+	if !unattended || !plain.NeedsPrompt {
+		return plain
+	}
+	global := strings.TrimSpace(string(daemon.ApprovalMode))
+	if strings.TrimSpace(policy.ApprovalMode) != "" {
+		global = strings.TrimSpace(policy.ApprovalMode)
+	}
+	if Mode(global) != ModeAlwaysApprove {
+		return plain
+	}
+	return Decision{
+		Mode: ModeAlwaysApprove, NeedsPrompt: false, By: "policy",
+		Reason:     "global always-approve (unattended override of ask/force_ask gates)",
+		Unattended: true,
+	}
 }
 
 // Resolve applies FR-4.1 order:

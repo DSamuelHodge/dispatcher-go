@@ -134,3 +134,48 @@ func TestResolveTierRiskMatrix(t *testing.T) {
 		})
 	}
 }
+
+func forceAskVerb() verbs.Verb {
+	return verbs.Verb{
+		Name:                     "sms.send",
+		Tier:                     verbs.TierB,
+		Risk:                     verbs.RiskHigh,
+		Approval:                 verbs.ApprovalInherit,
+		ForceAskEvenIfGlobalAuto: true,
+	}
+}
+
+func TestResolveUnattendedBypassesForceAsk(t *testing.T) {
+	v := forceAskVerb()
+	d := config.Default()
+	d.ApprovalMode = config.ApprovalAlwaysApprove
+	dec := approve.ResolveUnattended(v, d, approve.PolicyFile{ApprovalMode: "always-approve"}, true)
+	if dec.NeedsPrompt {
+		t.Fatalf("unattended should not prompt: %+v", dec)
+	}
+	if !dec.Unattended {
+		t.Fatalf("bypass must be flagged: %+v", dec)
+	}
+}
+
+func TestResolveUnattendedOffPrompts(t *testing.T) {
+	v := forceAskVerb()
+	d := config.Default()
+	d.ApprovalMode = config.ApprovalAlwaysApprove
+	dec := approve.ResolveUnattended(v, d, approve.PolicyFile{ApprovalMode: "always-approve"}, false)
+	if !dec.NeedsPrompt || dec.Unattended {
+		t.Fatalf("dec=%+v", dec)
+	}
+}
+
+func TestResolveUnattendedStillGatesUnderGlobalAsk(t *testing.T) {
+	// Unattended removes ONLY the force_ask carve-out, not the gate:
+	// under global ask the verb still prompts (times out to denied).
+	v := forceAskVerb()
+	d := config.Default()
+	d.ApprovalMode = config.ApprovalAsk
+	dec := approve.ResolveUnattended(v, d, approve.PolicyFile{}, true)
+	if !dec.NeedsPrompt || dec.Unattended {
+		t.Fatalf("dec=%+v", dec)
+	}
+}

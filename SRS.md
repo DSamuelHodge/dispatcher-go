@@ -104,6 +104,10 @@ Task states (normative): spec §9.1 — `accepted`, `pending_approval`, `approve
 - FR-4.2 `ask`: run `termux-dialog confirm -t "Approve <verb>?"` (redacted args), 120s block;
   `yes` → approved; else/timeout → denied. Denied/canceled NEVER retry.
 - FR-4.3 `always-approve`: auto-execute, audit `approved{by:"policy"}`. Explicitly user-enabled only.
+- FR-4.5 Unattended (remote-agent full autonomy): `-unattended` (or `DISPATCHER_UNATTENDED=1`)
+  makes an explicit global `always-approve` absolute, overriding per-verb `ask` and `force_ask`
+  gates. Without global `always-approve` it changes nothing. Every bypassed approval audits
+  `unattended:true`; `/v1/health` reports `approval.unattended` / `unattended_high_risk`.
 - FR-4.4 `stdin:true`: body → child stdin pipe; `[REDACTED]` in dialog, task GET, audit, SQLite.
 
 ### FR-5 Audit
