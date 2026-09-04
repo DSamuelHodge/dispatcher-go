@@ -39,43 +39,11 @@ Every route needs an `X-Agent-Token` header. The token is generated into
 private on Android, so the token is the real access control — share it
 with the brain, rotate by deleting the file and restarting.
 
-## Smoke test
-
-(Device unlocked the first time, so permission prompts can fire.)
-
-    TOKEN=$(cat ~/dispatcher-go/.agent-token)
-    PORT=8477  # or whichever free port setup.sh printed
-    curl -H "X-Agent-Token: $TOKEN" http://127.0.0.1:$PORT/v1/health
-    curl -X POST -H "X-Agent-Token: $TOKEN" -H 'Content-Type: application/json' \
-      -d '{}' http://127.0.0.1:$PORT/v1/verbs/battery.status
-    curl -H "X-Agent-Token: $TOKEN" http://127.0.0.1:$PORT/v1/tasks/<task_id>
-
-    # high-risk verb — pops a termux-dialog confirm on the phone (120s timeout denies)
-    curl -X POST -H "X-Agent-Token: $TOKEN" -H 'Content-Type: application/json' \
-      -d '{"args": {"number": "+15551234567"}, "stdin": "test"}' \
-      http://127.0.0.1:$PORT/v1/verbs/sms.send
-
-## Adding a verb
-
-Edit `verbs.yaml` only. Each entry needs `argv` (a known `termux-*`
-binary, no shell), `args` with `flag`/`type`/`required`, `tier`, `risk`,
-and `approval`. Missing optional args are omitted flag-and-all; unknown
-fields are rejected. Check with:
-
-    go run ./cmd/dispatcher -catalog verbs.yaml -validate
-
-Upstream reference: [docs/termux-api-reference.md](docs/termux-api-reference.md).
-
-## Tests
-
-    go test ./... -count=1 -p 2
-    go vet ./...
-    go run ./cmd/dispatcher -catalog verbs.yaml -validate
-
 ## Go deeper
 
-- [`docs/OPERATOR_GUIDE.md`](docs/OPERATOR_GUIDE.md) — approval model,
-  audit/durability, flags, troubleshooting, remote access via tailcat.
+- [`docs/OPERATOR_GUIDE.md`](docs/OPERATOR_GUIDE.md) — smoke test,
+  adding verbs, tests, approval model, audit/durability, flags,
+  troubleshooting, remote access via tailcat.
 - [`spec.md`](spec.md), [`SRS.md`](SRS.md), [`docs/adr/`](docs/adr/) —
   spec, requirements, design records.
 - [`SECURITY.md`](SECURITY.md), [`LICENSE`](LICENSE).

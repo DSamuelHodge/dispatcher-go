@@ -1,7 +1,61 @@
 # Operator guide (dispatcher-go)
 
 Deep reference for running the daemon day-to-day. The [README](../README.md)
-covers install, auth, and smoke tests.
+covers install and auth.
+
+## Smoke test
+
+From another Termux session (device unlocked the first time, so
+permission prompts can fire):
+
+    TOKEN=$(cat ~/dispatcher-go/.agent-token)
+    PORT=8477  # or whichever free port setup.sh printed
+    curl -H "X-Agent-Token: $TOKEN" http://127.0.0.1:$PORT/v1/health
+    curl -H "X-Agent-Token: $TOKEN" http://127.0.0.1:$PORT/v1/verbs
+    curl -X POST -H "X-Agent-Token: $TOKEN" -H 'Content-Type: application/json' \
+      -d '{}' http://127.0.0.1:$PORT/v1/verbs/battery.status
+    # poll the task to completion
+    curl -H "X-Agent-Token: $TOKEN" http://127.0.0.1:$PORT/v1/tasks/<task_id>
+
+    # Tier B — start a subscription, poll it, stop it
+    ID=$(curl -X POST -H "X-Agent-Token: $TOKEN" -H 'Content-Type: application/json' \
+      -d '{"verb": "sensor.stream", "args": {"name": "accelerometer"}}' \
+      http://127.0.0.1:$PORT/v1/streams | grep -o '"stream_id":"[^"]*"' | cut -d'"' -f4)
+    curl -H "X-Agent-Token: $TOKEN" http://127.0.0.1:$PORT/v1/streams/$ID?since=
+    curl -X DELETE -H "X-Agent-Token: $TOKEN" http://127.0.0.1:$PORT/v1/streams/$ID
+
+    # high-risk verb — pops a termux-dialog confirm on the phone
+    # and blocks until you tap yes/no (120s timeout denies)
+    curl -X POST -H "X-Agent-Token: $TOKEN" -H 'Content-Type: application/json' \
+      -d '{"args": {"number": "+15551234567"}, "stdin": "test"}' \
+      http://127.0.0.1:$PORT/v1/verbs/sms.send
+
+## Adding a verb
+
+Edit `verbs.yaml` only — no code changes needed for any Tier A/B command
+(including ones whose official script reads the payload from stdin: set
+`stdin_arg: {arg: <name>}` and the dispatcher pipes the value, redacting
+it in the audit log / confirm dialog).
+
+Each entry needs `argv` (must start with a known `termux-*` binary, no
+shell), `args` with `flag`/`type`/`required`, `tier`, `risk`, and
+`approval` (`ask` / `always-approve` / `inherit`). Missing optional args
+are omitted flag-and-all, never passed as empty strings. Unknown YAML
+fields are rejected, so typos fail fast — check with:
+
+    go run ./cmd/dispatcher -catalog verbs.yaml -validate
+
+The classified upstream surface is in
+[termux-api-reference.md](termux-api-reference.md).
+`verbs.yaml` is what the dispatcher loads. Copy a reference row into the
+YAML with its real argv template and it is live everywhere (routing,
+approval gating, execution) on next daemon restart.
+
+## Tests
+
+    go test ./... -count=1 -p 2
+    go vet ./...
+    go run ./cmd/dispatcher -catalog verbs.yaml -validate
 
 ## Approval model
 
